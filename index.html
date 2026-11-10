@@ -13,14 +13,16 @@
 <body data-auth="loading">
   <header class="topbar">
     <a class="brand" href="#" data-view="today">Customer Book</a>
+    <label class="switcher" hidden><span class="sr">Book</span><select id="ws-switch"></select></label>
     <nav class="tabs" aria-label="Main">
       <button data-view="today">Today</button>
       <button data-view="contacts">Contacts</button>
       <button data-view="deals">Deals</button>
+      <button data-view="people">People</button>
     </nav>
     <div class="account">
       <span id="who"></span>
-      <button class="btn ghost small" id="signout">Sign out</button>
+      <button class="btn ghost small" data-signout>Sign out</button>
     </div>
   </header>
 
