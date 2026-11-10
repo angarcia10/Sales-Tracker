@@ -1,4 +1,76 @@
 <!doctype html>
+<!--
+  Customer Book: a shareable, invite-only CRM. Everything is in this one file.
+
+  SETUP
+  1. Paste your Firebase values into the "STEP 1" section near the top of the <script> below.
+  2. In Firebase: Firestore Database → Rules tab → replace everything with the rules below → Publish.
+  3. Upload this file to your GitHub repo as index.html and turn on GitHub Pages.
+
+  ===== FIRESTORE SECURITY RULES (copy everything between the lines) =====
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn()  { return request.auth != null; }
+    function myEmail()   { return request.auth.token.email.lower(); }
+    function verified()  { return signedIn() && request.auth.token.email_verified == true; }
+    function isAdmin()   { return verified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
+    function invited()   { return verified() && exists(/databases/$(database)/documents/invites/$(myEmail())); }
+    function hasAccess() { return isAdmin() || invited(); }
+
+    // Admins are added by hand in the Firebase console (doc ID = the admin's user UID).
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+    }
+
+    // One invite per email address (doc ID = lowercase email). Only admins manage invites.
+    match /invites/{inviteEmail} {
+      allow get: if verified() && (inviteEmail == myEmail() || isAdmin());
+      allow list, delete: if isAdmin();
+      allow create, update: if isAdmin()
+        && inviteEmail == inviteEmail.lower()
+        && request.resource.data.email == inviteEmail;
+    }
+
+    // Basic profile so the admin can see who has joined.
+    match /users/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid || isAdmin());
+      allow list: if isAdmin();
+      allow create, update: if hasAccess()
+        && request.auth.uid == uid
+        && request.resource.data.email == myEmail();
+    }
+
+    // A workspace is either someone's private book (ID = their UID) or a team book.
+    match /workspaces/{wsId} {
+      allow get: if hasAccess() && (wsId == request.auth.uid || request.auth.uid in resource.data.memberIds
+                                    || (isAdmin() && resource.data.type == 'team'));
+      allow list: if hasAccess() && (request.auth.uid in resource.data.memberIds
+                                     || (isAdmin() && resource.data.type == 'team'));
+
+      allow create: if hasAccess() && (
+          (wsId == request.auth.uid
+            && request.resource.data.type == 'personal'
+            && request.resource.data.memberIds == [request.auth.uid])
+        || (isAdmin() && request.resource.data.type == 'team'));
+
+      // Only admins change teams (name, members). Private books can't be shared.
+      allow update: if isAdmin() && resource.data.type == 'team' && request.resource.data.type == 'team';
+      allow delete: if isAdmin() && resource.data.type == 'team';
+
+      // Contacts, deals and activity: any member of the workspace can read and write.
+      match /{col}/{docId} {
+        allow read, write: if hasAccess()
+          && col in ['contacts', 'deals', 'interactions']
+          && request.auth.uid in get(/databases/$(database)/documents/workspaces/$(wsId)).data.memberIds;
+      }
+    }
+  }
+}
+
+  =========================================================================
+-->
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -7,7 +79,356 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Figtree:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css">
+  <style>
+:root {
+  --bg: #EDF0EE;
+  --surface: #FFFFFF;
+  --ink: #17201D;
+  --muted: #5A6964;
+  --line: #D3DBD7;
+  --soft: #E3EAE6;
+  --accent: #1D6A56;
+  --accent-ink: #FFFFFF;
+  --accent-soft: #D7EAE2;
+  --warn: #8F5E12;
+  --danger: #A33D2C;
+  --font: "Figtree", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111715;
+    --surface: #19211F;
+    --ink: #E4EBE8;
+    --muted: #94A39E;
+    --line: #2B3633;
+    --soft: #1F2A27;
+    --accent: #56B898;
+    --accent-ink: #0C1412;
+    --accent-soft: #1C3A30;
+    --warn: #E2AE55;
+    --danger: #E57A67;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.5 var(--font);
+}
+h1, h2 { margin: 0; line-height: 1.2; }
+a { color: var(--accent); }
+code { font-size: .9em; background: var(--soft); padding: 1px 5px; border-radius: 4px; }
+.num { font-variant-numeric: tabular-nums; }
+.sub { color: var(--muted); font-weight: 400; }
+.late { color: var(--danger); font-weight: 600; }
+.count {
+  display: inline-block; min-width: 1.6em; padding: 0 .45em; margin-left: .3em;
+  border-radius: 999px; background: var(--soft); color: var(--muted);
+  font-size: .7em; font-weight: 600; text-align: center; vertical-align: middle;
+}
+.count:empty { display: none; }
+.empty { color: var(--muted); }
+.empty.small { font-size: 14px; margin: 8px 4px; }
+.loading { color: var(--muted); text-align: center; margin-top: 20vh; }
+
+/* ---------- Buttons & fields ---------- */
+.btn {
+  font: inherit; font-size: 15px; font-weight: 600;
+  padding: 8px 14px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  cursor: pointer; white-space: nowrap;
+}
+.btn:hover { border-color: var(--muted); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.btn.primary:hover { filter: brightness(1.08); }
+.btn.ghost { background: transparent; border-color: transparent; }
+.btn.ghost:hover { background: var(--soft); }
+.btn.small { padding: 5px 10px; font-size: 14px; }
+.btn.full { width: 100%; }
+.danger-text { color: var(--danger); }
+.link {
+  font: inherit; background: none; border: 0; padding: 0; color: var(--accent);
+  cursor: pointer; text-align: left;
+}
+.link:hover { text-decoration: underline; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+
+input, select, textarea {
+  width: 100%; font: inherit; font-size: 16px; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  padding: 9px 11px;
+}
+textarea { resize: vertical; }
+.field { display: grid; gap: 4px; }
+.field > span { font-size: 14px; font-weight: 600; color: var(--muted); }
+.field small { color: var(--muted); font-size: 13px; }
+
+/* ---------- Top bar ---------- */
+.topbar {
+  position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: center; gap: 24px;
+  padding: 0 20px; min-height: 58px;
+  background: var(--surface); border-bottom: 1px solid var(--line);
+}
+.brand { font-weight: 700; font-size: 17px; color: var(--ink); text-decoration: none; }
+.tabs { display: flex; gap: 4px; align-self: stretch; }
+.tabs button {
+  font: inherit; font-weight: 600; color: var(--muted);
+  background: none; border: 0; padding: 0 12px; cursor: pointer;
+  border-bottom: 3px solid transparent; margin-bottom: -1px;
+}
+.tabs button:hover { color: var(--ink); }
+.tabs button[aria-current="page"] { color: var(--ink); border-bottom-color: var(--accent); }
+.account { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 14px; }
+body:not([data-auth="in"]) .tabs,
+body:not([data-auth="in"]) .account { display: none; }
+
+main { max-width: 980px; margin: 0 auto; padding: 28px 20px 80px; }
+
+/* ---------- Login ---------- */
+.login {
+  max-width: 380px; margin: 10vh auto 0; display: grid; gap: 16px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 28px;
+}
+.login h1 { font-size: 26px; }
+.login .sub, .login p { margin: -8px 0 4px; }
+.error { color: var(--danger); margin: 0; min-height: 0; font-size: 14px; }
+.error:empty { display: none; }
+.reset { justify-self: center; font-size: 14px; }
+
+/* ---------- Today ---------- */
+.today-head { margin-bottom: 24px; }
+.today-head .date { margin: 0; color: var(--accent); font-weight: 600; }
+.today-head h1 {
+  font-size: clamp(30px, 5.5vw, 44px); font-weight: 700; letter-spacing: -0.025em;
+  margin: 4px 0 18px; max-width: 20ch;
+}
+.head-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.figures {
+  display: grid; grid-template-columns: repeat(3, 1fr);
+  margin: 0 0 36px; border: 1px solid var(--line); border-radius: 12px;
+  background: var(--surface); overflow: hidden;
+}
+.figures > div { padding: 14px 18px; }
+.figures > div + div { border-left: 1px solid var(--line); }
+.figures dt { font-size: 14px; color: var(--muted); }
+.figures dd { margin: 2px 0 0; font-size: 24px; font-weight: 700; letter-spacing: -0.01em; }
+.figures span { font-size: 13px; color: var(--muted); }
+
+.block { margin-bottom: 32px; }
+.block h2 { font-size: 18px; margin-bottom: 12px; }
+.block-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.block-head h2 { margin: 0; }
+
+.follows, .contact-list, .deal-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.follow {
+  display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 16px;
+  padding: 12px 14px; background: var(--surface);
+  border: 1px solid var(--line); border-left: 4px solid var(--line); border-radius: 8px;
+}
+.follow.overdue { border-left-color: var(--danger); }
+.follow.overdue .when { color: var(--danger); font-weight: 600; }
+.follow.today { border-left-color: var(--accent); }
+.follow.today .when { color: var(--accent); font-weight: 600; }
+.follow-main {
+  font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer;
+  text-align: left; display: grid; gap: 2px; min-width: 0;
+}
+.follow-main:hover strong { text-decoration: underline; }
+.follow .last { color: var(--muted); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.when { font-size: 14px; color: var(--muted); white-space: nowrap; }
+
+/* ---------- Contacts ---------- */
+.page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; }
+.page-head h1 { font-size: 28px; letter-spacing: -0.02em; }
+.toolbar { display: flex; gap: 8px; margin-bottom: 16px; }
+.toolbar select { width: auto; }
+
+.row {
+  width: 100%; font: inherit; color: inherit; text-align: left; cursor: pointer;
+  display: grid; grid-template-columns: 1fr 120px 150px 100px; align-items: center; gap: 12px;
+  padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+}
+.row:hover { border-color: var(--muted); }
+.who { display: grid; min-width: 0; }
+.who .sub { font-size: 14px; }
+.value { text-align: right; font-weight: 600; }
+.chip {
+  justify-self: start; font-size: 13px; font-weight: 600;
+  padding: 2px 9px; border-radius: 999px; background: var(--soft); color: var(--muted);
+}
+.chip.customer { background: var(--accent-soft); color: var(--accent); }
+
+/* ---------- Contact detail ---------- */
+.back { margin: -6px 0 14px -10px; }
+.detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 20px; }
+.detail-head h1 { font-size: 32px; letter-spacing: -0.02em; }
+.detail-head .sub { margin: 4px 0 0; }
+.facts {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 1px;
+  margin: 0 0 20px; background: var(--line); border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+}
+.facts > div { background: var(--surface); padding: 12px 16px; min-width: 0; }
+.facts dt { font-size: 13px; color: var(--muted); }
+.facts dd { margin: 2px 0 0; font-weight: 600; overflow-wrap: anywhere; }
+.notes { white-space: pre-wrap; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; margin: 0 0 28px; }
+
+.deal {
+  width: 100%; font: inherit; color: inherit; text-align: left; cursor: pointer;
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+}
+.deal:hover { border-color: var(--muted); }
+.deal > span:first-child { display: grid; }
+.deal .sub { font-size: 14px; }
+.deal .num { font-weight: 700; }
+
+.timeline { list-style: none; margin: 0; padding: 0 0 0 4px; }
+.timeline li {
+  position: relative; display: grid; grid-template-columns: 110px 1fr auto; gap: 14px;
+  padding: 0 0 16px 18px; border-left: 2px solid var(--line);
+}
+.timeline li::before {
+  content: ""; position: absolute; left: -6px; top: 6px;
+  width: 10px; height: 10px; border-radius: 50%; background: var(--accent);
+}
+.timeline li:last-child { border-left-color: transparent; }
+.t-date { font-weight: 600; font-size: 14px; display: grid; }
+.t-date span { font-weight: 400; color: var(--muted); }
+.timeline p { margin: 0; white-space: pre-wrap; }
+.x {
+  font-size: 18px; line-height: 1; width: 28px; height: 28px; border-radius: 6px;
+  border: 0; background: none; color: var(--muted); cursor: pointer;
+}
+.x:hover { background: var(--soft); color: var(--danger); }
+
+/* ---------- Deals board ---------- */
+.board { display: grid; grid-template-columns: repeat(5, minmax(170px, 1fr)); gap: 10px; overflow-x: auto; padding-bottom: 8px; }
+.col { background: var(--soft); border-radius: 10px; padding: 10px; display: grid; gap: 8px; align-content: start; }
+.col > header { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 2px 4px 4px; border-top: 3px solid var(--line); padding-top: 8px; }
+.col h2 { font-size: 15px; }
+.col > header .num { font-size: 14px; color: var(--muted); font-weight: 600; }
+.stage-won > header { border-top-color: var(--accent); }
+.stage-lost > header { border-top-color: var(--muted); }
+.stage-proposal-sent > header { border-top-color: var(--warn); }
+.card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px; display: grid; gap: 4px;
+}
+.card-main {
+  font: inherit; color: inherit; background: none; border: 0; padding: 0; text-align: left; cursor: pointer;
+  display: grid; gap: 2px;
+}
+.card-main:hover strong { text-decoration: underline; }
+.card-main .num { font-weight: 700; }
+.card .link { font-size: 14px; color: var(--muted); }
+.card select { font-size: 14px; padding: 5px 8px; margin-top: 4px; }
+
+/* ---------- Dialog ---------- */
+dialog {
+  border: 0; padding: 0; border-radius: 14px; width: min(580px, calc(100vw - 24px));
+  background: var(--surface); color: var(--ink); box-shadow: 0 20px 60px rgba(0, 0, 0, .25);
+}
+dialog::backdrop { background: rgba(8, 18, 14, .5); }
+.sheet { padding: 22px; }
+.sheet h2 { font-size: 20px; margin-bottom: 18px; }
+.sheet .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.sheet .wide { grid-column: 1 / -1; }
+.actions { display: flex; align-items: center; gap: 8px; margin-top: 22px; }
+.spacer { flex: 1; }
+
+/* ---------- Toast ---------- */
+#toast {
+  position: fixed; left: 50%; bottom: 24px; transform: translate(-50%, 20px);
+  background: var(--ink); color: var(--bg); padding: 10px 18px; border-radius: 8px;
+  font-weight: 600; font-size: 15px; opacity: 0; pointer-events: none;
+  transition: opacity .2s, transform .2s; z-index: 50; max-width: calc(100vw - 32px);
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---------- Small screens ---------- */
+@media (max-width: 720px) {
+  .topbar { flex-wrap: wrap; gap: 0 12px; padding: 10px 16px 0; }
+  .brand { flex: 1; }
+  .account #who { display: none; }
+  .tabs { order: 3; width: 100%; margin-top: 6px; }
+  .tabs button { flex: 1; padding: 10px 0; }
+  main { padding: 20px 16px 80px; }
+  .figures { grid-template-columns: 1fr; }
+  .figures > div + div { border-left: 0; border-top: 1px solid var(--line); }
+  .follow { grid-template-columns: 1fr auto; gap: 8px 12px; }
+  .follow .btn { grid-column: 1 / -1; justify-self: start; }
+  .row { grid-template-columns: 1fr auto; gap: 6px 12px; }
+  .row .when { grid-column: 1; }
+  .row .value { grid-column: 2; grid-row: 2; }
+  .board { grid-template-columns: 1fr; overflow: visible; }
+  .timeline li { grid-template-columns: 1fr auto; }
+  .timeline .t-date { grid-column: 1; display: flex; gap: 8px; }
+  .timeline p { grid-column: 1 / -1; grid-row: 2; }
+  .timeline .x { grid-column: 2; grid-row: 1; }
+  .sheet .grid { grid-template-columns: 1fr; }
+  .toolbar { flex-wrap: wrap; }
+  .toolbar select { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #toast { transition: none; }
+}
+
+/* ---------- Sharing: book switcher, auth screens, people & teams ---------- */
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.switcher select {
+  width: auto; max-width: 220px; font-size: 15px; font-weight: 600;
+  padding: 6px 30px 6px 10px; background-color: var(--soft); border-color: transparent;
+}
+body[data-admin="no"] .tabs [data-view="people"] { display: none; }
+.book { margin: 0 0 6px; font-size: 14px; font-weight: 600; color: var(--muted); }
+.page-head + .book, #contacts-shell > .book { margin-bottom: 8px; }
+.switch { margin: 0; text-align: center; font-size: 14px; color: var(--muted); }
+.login p { margin: 0; }
+.login .btn.full + .btn.full { margin-top: -8px; }
+.intro { margin: -8px 0 24px; max-width: 62ch; }
+
+.people { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.person {
+  display: grid; grid-template-columns: minmax(0, 1.4fr) auto minmax(0, 1fr) auto; align-items: center; gap: 12px;
+  padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+}
+.person .who .sub { font-size: 14px; overflow-wrap: anywhere; }
+.teams-of { font-size: 14px; }
+.person-actions { display: flex; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.chip.joined, .chip.admin { background: var(--accent-soft); color: var(--accent); }
+.chip.waiting { color: var(--warn); }
+.chip.none { color: var(--danger); }
+
+.teams { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.team { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+.team header { display: grid; gap: 8px; margin-bottom: 10px; }
+.team h3 { margin: 0; font-size: 17px; }
+.team-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.members { list-style: none; margin: 0; padding: 0; }
+.members li { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-top: 1px solid var(--line); }
+.invite-text { margin-top: 14px; font-size: 15px; background: var(--bg); }
+a.btn { text-decoration: none; display: inline-block; }
+
+@media (max-width: 720px) {
+  .switcher, .account { order: 2; }
+  .switcher select { max-width: 160px; }
+  .person { grid-template-columns: 1fr auto; }
+  .teams-of { grid-column: 1 / -1; }
+  .person-actions { grid-column: 1 / -1; justify-content: flex-start; }
+  .actions { flex-wrap: wrap; }
+}
+</style>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📇</text></svg>">
 </head>
 <body data-auth="loading">
@@ -31,6 +452,960 @@
   <dialog id="dlg"></dialog>
   <div id="toast" role="status" aria-live="polite"></div>
 
-  <script type="module" src="app.js"></script>
+  <script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {
+  getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
+  updateProfile, sendEmailVerification, sendPasswordResetEmail, signOut,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+  collection, doc, getDoc, getDocs, setDoc, updateDoc, deleteDoc, onSnapshot, query, where,
+  serverTimestamp, writeBatch, arrayUnion, arrayRemove, deleteField,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// =====================================================================
+//  STEP 1: PASTE YOUR FIREBASE VALUES HERE
+//  Firebase console → Project settings → General → Your apps → Config
+//  Only change the text inside the quotes. Keep the commas and the }; at the end.
+// =====================================================================
+const firebaseConfig = {
+  apiKey: "PASTE_YOUR_API_KEY",
+  authDomain: "your-project-id.firebaseapp.com",
+  projectId: "your-project-id",
+  storageBucket: "your-project-id.appspot.com",
+  messagingSenderId: "000000000000",
+  appId: "PASTE_YOUR_APP_ID",
+};
+
+// Currency for deal values, e.g. "USD", "EUR", "GBP", "AUD".
+const CURRENCY = "USD";
+// =====================================================================
+
+const $ = (sel, el = document) => el.querySelector(sel);
+const main = $("#main");
+
+if (!firebaseConfig.apiKey || firebaseConfig.apiKey.startsWith("PASTE")) {
+  document.body.dataset.auth = "out";
+  main.innerHTML = `<div class="login"><h1>Almost there</h1>
+    <p>Open <code>index.html</code> in a text editor, paste your Firebase values into the section marked “STEP 1” near the top of the script, then reload.</p></div>`;
+  throw new Error("Missing Firebase config");
+}
+
+const fbApp = initializeApp(firebaseConfig);
+const auth = getAuth(fbApp);
+const db = initializeFirestore(fbApp, { localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }) });
+
+// ---------- Constants & state ----------
+const STAGES = ["New lead", "Contacted", "Proposal sent", "Won", "Lost"];
+const OPEN_STAGES = STAGES.slice(0, 3);
+const STATUSES = ["Lead", "Customer", "Past customer"];
+const TYPES = ["Call", "Email", "Meeting", "Message", "Other"];
+const COLS = ["contacts", "deals", "interactions"];
+
+const state = {
+  user: null, name: "", email: "", isAdmin: false,
+  workspaces: [], wsId: null,
+  contacts: [], deals: [], interactions: [],
+  invites: [], users: [], teams: [],
+  view: "today", contactId: null, search: "", statusFilter: "All",
+};
+const unsubCore = [], unsubData = [];
+const stopAll = (list) => { list.forEach((u) => u()); list.length = 0; };
+
+// ---------- Helpers ----------
+const money = new Intl.NumberFormat(undefined, { style: "currency", currency: CURRENCY, maximumFractionDigits: 0 });
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const slug = (s) => String(s || "").toLowerCase().replace(/[^a-z]+/g, "-");
+const pad = (n) => String(n).padStart(2, "0");
+const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+const today = () => iso(new Date());
+const addDays = (s, n) => { const [y, m, d] = s.split("-").map(Number); return iso(new Date(y, m - 1, d + n)); };
+const fmtDate = (s) => {
+  if (!s) return "";
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString(undefined, {
+    month: "short", day: "numeric", year: y !== new Date().getFullYear() ? "numeric" : undefined,
+  });
+};
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const sum = (deals) => deals.reduce((t, d) => t + (Number(d.amount) || 0), 0);
+const byName = (a, b) => (a.name || "").localeCompare(b.name || "");
+const byId = (name, id) => state[name].find((x) => x.id === id);
+const contactName = (id) => byId("contacts", id)?.name || "Unknown contact";
+const openDealsFor = (cid) => state.deals.filter((d) => d.contactId === cid && OPEN_STAGES.includes(d.stage));
+const lastInteraction = (cid) => state.interactions
+  .filter((i) => i.contactId === cid)
+  .sort((a, b) => (b.date || "").localeCompare(a.date || ""))[0];
+const store = {
+  get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* ignore */ } },
+};
+
+const currentWs = () => state.workspaces.find((w) => w.id === state.wsId);
+const isTeam = () => currentWs()?.type === "team";
+const me = () => ({ uid: state.user.uid, name: state.name });
+const col = (name) => collection(db, "workspaces", state.wsId, name);
+const ref = (name, id) => doc(db, "workspaces", state.wsId, name, id);
+const fail = (err) => toast(`Couldn't save: ${err.message}`);
+
+// Writes go to the local cache instantly and sync in the background.
+function save(name, data, id) {
+  const stamp = { updatedAt: serverTimestamp(), updatedBy: me() };
+  if (id) { updateDoc(ref(name, id), { ...data, ...stamp }).catch(fail); return id; }
+  const r = doc(col(name));
+  setDoc(r, { ...data, ...stamp, createdAt: serverTimestamp(), createdBy: me() }).catch(fail);
+  return r.id;
+}
+
+let toastTimer;
+function toast(msg) {
+  const el = $("#toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 3200);
+}
+
+const setAuth = (v) => { document.body.dataset.auth = v; };
+
+// ---------- Sign-in & access ----------
+let bootRun = 0;
+onAuthStateChanged(auth, (user) => boot(user));
+
+async function boot(user) {
+  const run = ++bootRun;
+  stopAll(unsubCore); stopAll(unsubData);
+  Object.assign(state, {
+    user, isAdmin: false, workspaces: [], wsId: null, contacts: [], deals: [], interactions: [],
+    invites: [], users: [], teams: [], view: "today", contactId: null,
+  });
+  document.body.dataset.admin = "no";
+  $(".switcher").hidden = true;
+
+  if (!user) { setAuth("out"); renderAuth("signin"); return; }
+  if (!user.emailVerified) { setAuth("out"); renderVerify(); return; }
+
+  setAuth("loading");
+  main.innerHTML = `<p class="loading">Loading…</p>`;
+  state.email = user.email.toLowerCase();
+  state.name = user.displayName || state.email.split("@")[0];
+
+  try {
+    const [adminSnap, inviteSnap] = await Promise.all([
+      getDoc(doc(db, "admins", user.uid)).catch(() => null),
+      getDoc(doc(db, "invites", state.email)).catch(() => null),
+    ]);
+    if (run !== bootRun) return;
+    state.isAdmin = !!adminSnap?.exists();
+    if (!state.isAdmin && !inviteSnap?.exists()) { setAuth("out"); renderNoAccess(); return; }
+    if (!user.displayName && inviteSnap?.data()?.name) state.name = inviteSnap.data().name;
+
+    setDoc(doc(db, "users", user.uid), { email: state.email, name: state.name, lastSeen: serverTimestamp() }, { merge: true }).catch(fail);
+    const personal = doc(db, "workspaces", user.uid);
+    if (!(await getDoc(personal)).exists()) {
+      // Wait for the server here: the data listeners need this book to exist first.
+      await setDoc(personal, {
+        type: "personal", name: "My book", memberIds: [user.uid],
+        members: { [user.uid]: { name: state.name, email: state.email } },
+        createdBy: user.uid, createdAt: serverTimestamp(),
+      });
+    }
+  } catch (err) {
+    if (run === bootRun) { setAuth("out"); renderProblem(err); }
+    return;
+  }
+  if (run !== bootRun) return;
+
+  document.body.dataset.admin = state.isAdmin ? "yes" : "no";
+  $("#who").textContent = state.name;
+  setAuth("in");
+
+  unsubCore.push(onSnapshot(
+    query(collection(db, "workspaces"), where("memberIds", "array-contains", user.uid)),
+    (snap) => {
+      state.workspaces = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) =>
+        a.type === b.type ? (a.name || "").localeCompare(b.name || "") : a.type === "personal" ? -1 : 1);
+      const want = state.wsId || store.get(`cb-ws-${user.uid}`) || user.uid;
+      const next = state.workspaces.some((w) => w.id === want) ? want : user.uid;
+      if (next !== state.wsId) switchWorkspace(next);
+      else { renderSwitcher(); render(); }
+    },
+    (err) => toast(`Couldn't load your books: ${err.message}`),
+  ));
+
+  if (state.isAdmin) {
+    const listen = (q, key) => unsubCore.push(onSnapshot(q, (snap) => {
+      state[key] = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      if (state.view === "people") render();
+    }, (err) => toast(`Couldn't load ${key}: ${err.message}`)));
+    listen(collection(db, "invites"), "invites");
+    listen(collection(db, "users"), "users");
+    listen(query(collection(db, "workspaces"), where("type", "==", "team")), "teams");
+  }
+}
+
+function switchWorkspace(id) {
+  stopAll(unsubData);
+  Object.assign(state, { wsId: id, contactId: null, contacts: [], deals: [], interactions: [] });
+  store.set(`cb-ws-${state.user.uid}`, id);
+  for (const name of COLS) {
+    unsubData.push(onSnapshot(col(name), (snap) => {
+      state[name] = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      render();
+    }, (err) => { if (err.code !== "permission-denied") toast(`Couldn't load ${name}: ${err.message}`); }));
+  }
+  main.innerHTML = "";
+  renderSwitcher();
+  render();
+}
+
+function renderSwitcher() {
+  const wrap = $(".switcher"), sel = $("#ws-switch");
+  wrap.hidden = state.workspaces.length < 2;
+  sel.innerHTML = state.workspaces.map((w) =>
+    `<option value="${esc(w.id)}" ${w.id === state.wsId ? "selected" : ""}>${esc(w.type === "personal" ? "My book" : w.name)}</option>`).join("");
+}
+
+const authMessage = (err) => ({
+  "auth/invalid-credential": "That email and password don’t match.",
+  "auth/invalid-email": "Enter a valid email address.",
+  "auth/email-already-in-use": "There’s already an account with this email. Sign in instead.",
+  "auth/weak-password": "Choose a longer password (at least 8 characters).",
+  "auth/too-many-requests": "Too many attempts. Wait a few minutes and try again.",
+  "auth/network-request-failed": "No connection. Check your internet and try again.",
+  "auth/operation-not-allowed": "Account creation is turned off for this app. Ask the admin to turn it on.",
+  "auth/admin-restricted-operation": "Account creation is turned off for this app. Ask the admin to turn it on.",
+}[err.code] || err.message);
+
+function renderAuth(mode) {
+  const signup = mode === "signup";
+  main.innerHTML = `
+    <form class="login" id="auth-form">
+      <h1>${signup ? "Create your account" : "Customer Book"}</h1>
+      <p class="sub">${signup ? "Use the email address your invite was sent to." : "Sign in to see your contacts and sales."}</p>
+      ${signup ? `<label class="field"><span>Your name</span><input name="name" autocomplete="name" required></label>` : ""}
+      <label class="field"><span>Email</span><input name="email" type="email" autocomplete="${signup ? "email" : "username"}" required></label>
+      <label class="field"><span>Password</span>
+        <input name="password" type="password" autocomplete="${signup ? "new-password" : "current-password"}" ${signup ? 'minlength="8"' : ""} required>
+        ${signup ? "<small>At least 8 characters.</small>" : ""}
+      </label>
+      <p class="error" id="auth-error" role="alert"></p>
+      <button class="btn primary full">${signup ? "Create account" : "Sign in"}</button>
+      ${signup
+        ? `<p class="switch">Already have an account? <button type="button" class="link" data-auth-mode="signin">Sign in</button></p>`
+        : `<button type="button" class="link reset" id="reset">Forgot password?</button>
+           <p class="switch">Been invited? <button type="button" class="link" data-auth-mode="signup">Create your account</button></p>`}
+    </form>`;
+
+  const form = $("#auth-form"), errEl = $("#auth-error");
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const f = new FormData(form);
+    const email = String(f.get("email")).trim(), password = String(f.get("password"));
+    const btn = form.querySelector(".primary");
+    btn.disabled = true;
+    try {
+      if (signup) {
+        const cred = await createUserWithEmailAndPassword(auth, email, password);
+        await updateProfile(cred.user, { displayName: String(f.get("name")).trim() });
+        await sendEmailVerification(cred.user);
+      } else {
+        await signInWithEmailAndPassword(auth, email, password);
+      }
+    } catch (err) { errEl.textContent = authMessage(err); btn.disabled = false; }
+  });
+  if (!signup) {
+    $("#reset").onclick = async () => {
+      const email = form.email.value.trim();
+      if (!email) { errEl.textContent = "Enter your email above, then select “Forgot password?” again."; return; }
+      try { await sendPasswordResetEmail(auth, email); toast("Password reset email sent"); }
+      catch (err) { errEl.textContent = authMessage(err); }
+    };
+  }
+  form.querySelector("input").focus();
+}
+
+function renderVerify() {
+  const u = auth.currentUser;
+  main.innerHTML = `
+    <div class="login">
+      <h1>Confirm your email</h1>
+      <p>We sent a link to <strong>${esc(u.email)}</strong>. Open it, then come back here. Check your spam folder if it doesn’t arrive in a minute or two.</p>
+      <p class="error" id="auth-error" role="alert"></p>
+      <button class="btn primary full" id="verified">I’ve confirmed my email</button>
+      <button class="btn full" id="resend">Send the link again</button>
+      <button class="link reset" data-signout>Sign out</button>
+    </div>`;
+  $("#verified").onclick = async () => {
+    await auth.currentUser.reload();
+    if (!auth.currentUser.emailVerified) {
+      $("#auth-error").textContent = "This email isn’t confirmed yet. Open the link in the email we sent, then try again.";
+      return;
+    }
+    await auth.currentUser.getIdToken(true);
+    boot(auth.currentUser);
+  };
+  $("#resend").onclick = async () => {
+    try { await sendEmailVerification(auth.currentUser); toast("Link sent"); }
+    catch (err) { $("#auth-error").textContent = authMessage(err); }
+  };
+}
+
+function renderNoAccess() {
+  main.innerHTML = `
+    <div class="login">
+      <h1>You haven’t been invited yet</h1>
+      <p>You’re signed in as <strong>${esc(auth.currentUser.email)}</strong>, but this address doesn’t have access.
+         Ask the person who runs Customer Book to invite it, then select “Try again”.</p>
+      <button class="btn primary full" data-retry>Try again</button>
+      <button class="link reset" data-signout>Sign out</button>
+    </div>`;
+}
+
+function renderProblem(err) {
+  main.innerHTML = `
+    <div class="login">
+      <h1>Couldn’t load your account</h1>
+      <p>${esc(err.message)}</p>
+      <p class="sub">If you just set up the app, check that the security rules (in the comment at the top of <code>index.html</code>) are published in Firebase.</p>
+      <button class="btn primary full" data-retry>Try again</button>
+      <button class="link reset" data-signout>Sign out</button>
+    </div>`;
+}
+
+// ---------- Rendering ----------
+function render() {
+  if (!state.user || document.body.dataset.auth !== "in" || !state.wsId) return;
+  if (state.view === "people" && !state.isAdmin) state.view = "today";
+  document.querySelectorAll(".tabs [data-view]").forEach((b) => {
+    if (b.dataset.view === state.view) b.setAttribute("aria-current", "page");
+    else b.removeAttribute("aria-current");
+  });
+  if (state.view === "today") renderToday();
+  else if (state.view === "contacts") (state.contactId ? renderContact() : renderContacts());
+  else if (state.view === "deals") renderDeals();
+  else renderPeople();
+}
+
+function bookLabel() {
+  const w = currentWs();
+  if (!w || w.type !== "team") return "";
+  return `<p class="book">${esc(w.name)}, shared with ${plural(w.memberIds.length, "person", "people")}</p>`;
+}
+
+function renderToday() {
+  const t = today(), week = addDays(t, 7);
+  const due = state.contacts.filter((c) => c.followUp).sort((a, b) => a.followUp.localeCompare(b.followUp));
+  const overdue = due.filter((c) => c.followUp < t);
+  const dueToday = due.filter((c) => c.followUp === t);
+  const soon = due.filter((c) => c.followUp > t && c.followUp <= week);
+  const open = state.deals.filter((d) => OPEN_STAGES.includes(d.stage));
+  const won = state.deals.filter((d) => d.stage === "Won");
+  const wonMonth = won.filter((d) => (d.wonDate || "").startsWith(t.slice(0, 7)));
+  const wonYear = won.filter((d) => (d.wonDate || "").startsWith(t.slice(0, 4)));
+  const count = overdue.length + dueToday.length;
+
+  const headline = !state.contacts.length ? "Let’s add your first customer"
+    : count === 0 ? "You’re all caught up"
+    : `${plural(count, "person", "people")} to follow up with`;
+
+  main.innerHTML = `
+    <section class="today-head">
+      ${bookLabel()}
+      <p class="date">${new Date().toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}</p>
+      <h1>${headline}</h1>
+      <div class="head-actions">
+        <button class="btn primary" data-add-contact>Add contact</button>
+        <button class="btn" data-add-deal>Add deal</button>
+      </div>
+    </section>
+    <dl class="figures">
+      <div><dt>Open pipeline</dt><dd class="num">${money.format(sum(open))}</dd><span>${plural(open.length, "deal", "deals")}</span></div>
+      <div><dt>Won this month</dt><dd class="num">${money.format(sum(wonMonth))}</dd><span>${plural(wonMonth.length, "sale", "sales")}</span></div>
+      <div><dt>Won this year</dt><dd class="num">${money.format(sum(wonYear))}</dd><span>${plural(wonYear.length, "sale", "sales")}</span></div>
+    </dl>
+    ${state.contacts.length ? `
+      ${followSection("Overdue", overdue, "overdue")}
+      ${followSection("Today", dueToday, "today")}
+      ${followSection("Next 7 days", soon, "soon")}`
+    : `<p class="empty">Add a contact, set a follow-up date, and they’ll show up here when it’s time to get in touch.</p>`}`;
+}
+
+function followSection(title, list, kind) {
+  if (!list.length) {
+    return kind === "today" ? `<section class="block"><h2>Today</h2><p class="empty">Nothing due today.</p></section>` : "";
+  }
+  return `<section class="block">
+    <h2>${title} <span class="count">${list.length}</span></h2>
+    <ul class="follows">${list.map((c) => followRow(c, kind)).join("")}</ul>
+  </section>`;
+}
+
+function followRow(c, kind) {
+  const last = lastInteraction(c.id);
+  return `<li class="follow ${kind}">
+    <button class="follow-main" data-open-contact="${esc(c.id)}">
+      <span><strong>${esc(c.name)}</strong>${c.company ? ` <span class="sub">${esc(c.company)}</span>` : ""}</span>
+      <span class="last">${last ? `Last: ${esc(last.summary)}` : "No activity logged yet"}</span>
+    </button>
+    <span class="when">${kind === "today" ? "Today" : fmtDate(c.followUp)}</span>
+    <button class="btn small" data-log="${esc(c.id)}">Log contact</button>
+  </li>`;
+}
+
+function renderContacts() {
+  if (!$("#contacts-shell")) {
+    main.innerHTML = `
+      <div id="contacts-shell">
+        ${bookLabel()}
+        <header class="page-head">
+          <h1>Contacts <span class="count" id="contact-count"></span></h1>
+          <button class="btn primary" data-add-contact>Add contact</button>
+        </header>
+        <div class="toolbar">
+          <input id="search" type="search" placeholder="Search name, company, email or phone" value="${esc(state.search)}" aria-label="Search contacts">
+          <select id="status-filter" aria-label="Filter by status">
+            ${["All", ...STATUSES].map((s) => `<option ${s === state.statusFilter ? "selected" : ""}>${s}</option>`).join("")}
+          </select>
+        </div>
+        <ul class="contact-list" id="contact-list"></ul>
+      </div>`;
+  }
+  renderContactList();
+}
+
+function renderContactList() {
+  const list = $("#contact-list");
+  if (!list) return;
+  const q = state.search.trim().toLowerCase(), t = today();
+  const rows = state.contacts
+    .filter((c) => state.statusFilter === "All" || (c.status || "Lead") === state.statusFilter)
+    .filter((c) => !q || [c.name, c.company, c.email, c.phone].some((v) => (v || "").toLowerCase().includes(q)))
+    .sort(byName);
+  $("#contact-count").textContent = state.contacts.length || "";
+  if (!state.contacts.length) { list.innerHTML = `<li class="empty">No contacts yet. Add your first customer or lead to get started.</li>`; return; }
+  if (!rows.length) { list.innerHTML = `<li class="empty">No contacts match your search.</li>`; return; }
+  list.innerHTML = rows.map((c) => {
+    const open = sum(openDealsFor(c.id));
+    const late = c.followUp && c.followUp < t;
+    return `<li><button class="row" data-open-contact="${esc(c.id)}">
+      <span class="who"><strong>${esc(c.name)}</strong>${c.company ? `<span class="sub">${esc(c.company)}</span>` : ""}</span>
+      <span class="chip ${slug(c.status || "Lead")}">${esc(c.status || "Lead")}</span>
+      <span class="when ${late ? "late" : ""}">${c.followUp ? `Follow up ${fmtDate(c.followUp)}` : "No follow-up"}</span>
+      <span class="num value">${open ? money.format(open) : ""}</span>
+    </button></li>`;
+  }).join("");
+}
+
+function renderContact() {
+  const c = byId("contacts", state.contactId);
+  if (!c) {
+    main.innerHTML = `<button class="btn ghost small back" data-back>Back to contacts</button>
+      <p class="empty">This contact isn’t available. It may have been deleted.</p>`;
+    return;
+  }
+  const t = today();
+  const deals = state.deals.filter((d) => d.contactId === c.id)
+    .sort((a, b) => STAGES.indexOf(a.stage) - STAGES.indexOf(b.stage));
+  const ints = state.interactions.filter((i) => i.contactId === c.id)
+    .sort((a, b) => (b.date || "").localeCompare(a.date || ""));
+  const late = c.followUp && c.followUp < t;
+
+  main.innerHTML = `
+    <button class="btn ghost small back" data-back>Back to contacts</button>
+    <header class="detail-head">
+      <div>
+        <h1>${esc(c.name)}</h1>
+        <p class="sub">${[c.company, c.status || "Lead"].filter(Boolean).map(esc).join(", ")}</p>
+      </div>
+      <div class="head-actions">
+        <button class="btn primary" data-log="${esc(c.id)}">Log contact</button>
+        <button class="btn" data-edit-contact="${esc(c.id)}">Edit</button>
+      </div>
+    </header>
+    <dl class="facts">
+      <div><dt>Next follow-up</dt><dd class="${late ? "late" : ""}">${c.followUp ? fmtDate(c.followUp) : "None set"}</dd></div>
+      <div><dt>Last contacted</dt><dd>${c.lastContacted ? fmtDate(c.lastContacted) : "Never"}</dd></div>
+      <div><dt>Email</dt><dd>${c.email ? `<a href="mailto:${esc(c.email)}">${esc(c.email)}</a>` : "Not added"}</dd></div>
+      <div><dt>Phone</dt><dd>${c.phone ? `<a href="tel:${esc(c.phone)}">${esc(c.phone)}</a>` : "Not added"}</dd></div>
+      <div><dt>Total won</dt><dd class="num">${money.format(sum(deals.filter((d) => d.stage === "Won")))}</dd></div>
+      ${isTeam() && c.createdBy?.name ? `<div><dt>Added by</dt><dd>${esc(c.createdBy.name)}</dd></div>` : ""}
+    </dl>
+    ${c.notes ? `<p class="notes">${esc(c.notes)}</p>` : ""}
+    <section class="block">
+      <div class="block-head"><h2>Deals</h2><button class="btn small" data-add-deal="${esc(c.id)}">Add deal</button></div>
+      ${deals.length ? `<ul class="deal-list">${deals.map(dealRow).join("")}</ul>` : `<p class="empty">No deals yet.</p>`}
+    </section>
+    <section class="block">
+      <div class="block-head"><h2>Activity</h2></div>
+      ${ints.length ? `<ol class="timeline">${ints.map((i) => `
+        <li>
+          <div class="t-date">${fmtDate(i.date)}<span>${esc(i.type)}${isTeam() && i.createdBy?.name ? `, ${esc(i.createdBy.name)}` : ""}</span></div>
+          <p>${esc(i.summary)}</p>
+          <button class="x" data-delete-interaction="${esc(i.id)}" aria-label="Delete this entry">×</button>
+        </li>`).join("")}</ol>`
+      : `<p class="empty">Nothing logged yet. Use “Log contact” after each call, email or meeting.</p>`}
+    </section>
+    <button class="btn ghost danger-text" data-delete-contact="${esc(c.id)}">Delete contact</button>`;
+}
+
+function dealRow(d) {
+  const when = d.stage === "Won" && d.wonDate ? `, won ${fmtDate(d.wonDate)}`
+    : d.closeDate && OPEN_STAGES.includes(d.stage) ? `, closes ${fmtDate(d.closeDate)}` : "";
+  return `<li><button class="deal" data-edit-deal="${esc(d.id)}">
+    <span><strong>${esc(d.title)}</strong><span class="sub">${esc(d.stage)}${when}</span></span>
+    <span class="num">${money.format(Number(d.amount) || 0)}</span>
+  </button></li>`;
+}
+
+function renderDeals() {
+  const t = today();
+  main.innerHTML = `
+    ${bookLabel()}
+    <header class="page-head">
+      <h1>Deals</h1>
+      <button class="btn primary" data-add-deal>Add deal</button>
+    </header>
+    <div class="board">${STAGES.map((s) => {
+      const ds = state.deals.filter((d) => (d.stage || "New lead") === s)
+        .sort((a, b) => (a.closeDate || "9999").localeCompare(b.closeDate || "9999"));
+      return `<section class="col stage-${slug(s)}">
+        <header><h2>${s}</h2><span class="num">${money.format(sum(ds))}</span></header>
+        ${ds.map((d) => {
+          const when = s === "Won" && d.wonDate ? `Won ${fmtDate(d.wonDate)}`
+            : d.closeDate && OPEN_STAGES.includes(s) ? `Closes ${fmtDate(d.closeDate)}` : "";
+          const late = OPEN_STAGES.includes(s) && d.closeDate && d.closeDate < t;
+          return `<article class="card">
+            <button class="card-main" data-edit-deal="${esc(d.id)}">
+              <strong>${esc(d.title)}</strong><span class="num">${money.format(Number(d.amount) || 0)}</span>
+            </button>
+            <button class="link sub" data-open-contact="${esc(d.contactId)}">${esc(contactName(d.contactId))}</button>
+            ${when ? `<span class="when ${late ? "late" : ""}">${when}</span>` : ""}
+            <select data-stage-for="${esc(d.id)}" aria-label="Move ${esc(d.title)} to stage">
+              ${STAGES.map((o) => `<option ${o === s ? "selected" : ""}>${o}</option>`).join("")}
+            </select>
+          </article>`;
+        }).join("") || `<p class="empty small">No deals</p>`}
+      </section>`;
+    }).join("")}</div>`;
+}
+
+// ---------- People & teams (admin) ----------
+function peopleList() {
+  const map = new Map();
+  for (const u of state.users) map.set(u.email, { email: u.email, name: u.name, uid: u.id, joined: true, invited: false });
+  for (const i of state.invites) {
+    const p = map.get(i.id) || { email: i.id, name: i.name, joined: false };
+    p.invited = true;
+    p.name = p.name || i.name;
+    map.set(i.id, p);
+  }
+  return [...map.values()].sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email));
+}
+
+function renderPeople() {
+  const people = peopleList();
+  const teams = [...state.teams].sort(byName);
+  const teamsOf = (uid) => teams.filter((t) => uid && t.memberIds?.includes(uid)).map((t) => t.name);
+
+  main.innerHTML = `
+    <header class="page-head">
+      <h1>People</h1>
+      <button class="btn primary" data-invite>Invite someone</button>
+    </header>
+    <p class="sub intro">Only people you invite can use Customer Book. Everyone gets their own private book, plus the books of any teams you add them to.</p>
+
+    <section class="block">
+      <h2>People with access <span class="count">${people.filter((p) => p.invited || p.uid === state.user.uid).length}</span></h2>
+      <ul class="people">${people.map((p) => {
+        const self = p.uid === state.user.uid;
+        const status = self ? ["admin", "You (admin)"] : !p.invited ? ["none", "No access"] : p.joined ? ["joined", "Joined"] : ["waiting", "Hasn’t signed up yet"];
+        const pteams = teamsOf(p.uid);
+        return `<li class="person">
+          <div class="who"><strong>${esc(p.name || p.email)}</strong><span class="sub">${esc(p.email)}</span></div>
+          <span class="chip ${status[0]}">${status[1]}</span>
+          <span class="sub teams-of">${pteams.length ? esc(pteams.join(", ")) : p.joined ? "No teams" : ""}</span>
+          <span class="person-actions">
+            ${p.invited && !p.joined ? `<button class="btn small" data-invite-msg="${esc(p.email)}">Invite message</button>` : ""}
+            ${p.invited && !self ? `<button class="btn small ghost danger-text" data-revoke="${esc(p.email)}">Remove access</button>` : ""}
+            ${!p.invited && !self ? `<button class="btn small" data-grant="${esc(p.email)}">Give access</button>` : ""}
+          </span>
+        </li>`;
+      }).join("") || `<li class="empty">No one yet. Invite someone to get started.</li>`}</ul>
+    </section>
+
+    <section class="block">
+      <div class="block-head"><h2>Teams <span class="count">${teams.length || ""}</span></h2><button class="btn small" data-create-team>Create team</button></div>
+      ${teams.length ? `<div class="teams">${teams.map((t) => `
+        <article class="team">
+          <header>
+            <h3>${esc(t.name)}</h3>
+            <span class="team-actions">
+              <button class="btn small" data-team-add="${esc(t.id)}">Add member</button>
+              <button class="btn small ghost" data-team-rename="${esc(t.id)}">Rename</button>
+              <button class="btn small ghost danger-text" data-team-delete="${esc(t.id)}">Delete</button>
+            </span>
+          </header>
+          <ul class="members">${(t.memberIds || []).map((uid) => {
+            const m = t.members?.[uid] || {};
+            return `<li><span>${esc(m.name || m.email || "Unknown")}${uid === state.user.uid ? " (you)" : ""}</span>
+              <button class="x" data-team-remove="${esc(t.id)}|${esc(uid)}" aria-label="Remove ${esc(m.name || m.email)} from ${esc(t.name)}">×</button></li>`;
+          }).join("") || `<li class="empty">No members</li>`}</ul>
+        </article>`).join("")}</div>`
+      : `<p class="empty">No teams yet. Create one to share a book of contacts and deals with a group.</p>`}
+    </section>`;
+}
+
+function inviteForm(prefill = {}) {
+  openForm({
+    title: "Invite someone",
+    submit: "Invite",
+    values: prefill,
+    fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "email", label: "Email", type: "email", required: true },
+    ],
+    onSubmit: ({ name, email }) => {
+      const e = email.toLowerCase();
+      setDoc(doc(db, "invites", e), { email: e, name, invitedBy: state.user.uid, createdAt: serverTimestamp() })
+        .then(() => { if (!state.users.some((u) => u.email === e)) inviteMessage(e, name); else toast(`Access given to ${name}`); })
+        .catch(fail);
+    },
+  });
+}
+
+function inviteMessage(email, name) {
+  const url = location.origin + location.pathname;
+  const text = `Hi ${name || "there"},
+
+You’ve been invited to Customer Book, where we track contacts and sales.
+
+1. Go to ${url}
+2. Select “Create your account” and sign up with ${email}
+3. Confirm your email using the link you’ll receive, then come back to the app.
+
+${state.name}`;
+  dlg.innerHTML = `<div class="sheet">
+    <h2>Send ${esc(name || email)} their invite</h2>
+    <p class="sub">Customer Book can’t send emails itself, so send this message from your own email or chat app.</p>
+    <textarea class="invite-text" rows="10" readonly>${esc(text)}</textarea>
+    <div class="actions">
+      <span class="spacer"></span>
+      <button type="button" class="btn ghost" data-close>Done</button>
+      <a class="btn" href="mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent("You’re invited to Customer Book")}&body=${encodeURIComponent(text)}">Open in email</a>
+      <button type="button" class="btn primary" data-copy>Copy message</button>
+    </div>
+  </div>`;
+  $("[data-close]", dlg).onclick = () => dlg.close();
+  $("[data-copy]", dlg).onclick = async () => {
+    try { await navigator.clipboard.writeText(text); toast("Message copied"); }
+    catch { $(".invite-text", dlg).select(); toast("Press Ctrl+C or Cmd+C to copy"); }
+  };
+  if (!dlg.open) dlg.showModal();
+}
+
+function revokeAccess(email) {
+  const p = peopleList().find((x) => x.email === email);
+  if (!confirm(`Remove access for ${p?.name || email}? They’ll be signed out of everything, including their private book. You can give access again later.`)) return;
+  const b = writeBatch(db);
+  b.delete(doc(db, "invites", email));
+  if (p?.uid) {
+    state.teams.filter((t) => t.memberIds?.includes(p.uid)).forEach((t) => {
+      b.update(doc(db, "workspaces", t.id), { memberIds: arrayRemove(p.uid), [`members.${p.uid}`]: deleteField() });
+    });
+  }
+  b.commit().then(() => toast("Access removed")).catch(fail);
+}
+
+function grantAccess(email) {
+  const p = peopleList().find((x) => x.email === email);
+  setDoc(doc(db, "invites", email), { email, name: p?.name || "", invitedBy: state.user.uid, createdAt: serverTimestamp() })
+    .then(() => toast(`Access given to ${p?.name || email}`)).catch(fail);
+}
+
+function teamForm(team) {
+  openForm({
+    title: team ? "Rename team" : "Create team",
+    submit: team ? "Save changes" : "Create team",
+    values: team || {},
+    fields: [{ name: "name", label: "Team name", required: true, wide: true }],
+    onSubmit: ({ name }) => {
+      if (team) { updateDoc(doc(db, "workspaces", team.id), { name }).catch(fail); toast("Changes saved"); return; }
+      setDoc(doc(collection(db, "workspaces")), {
+        type: "team", name, memberIds: [state.user.uid],
+        members: { [state.user.uid]: { name: state.name, email: state.email } },
+        createdBy: state.user.uid, createdAt: serverTimestamp(),
+      }).then(() => toast(`Team created. Add members, then switch to it from the menu at the top.`)).catch(fail);
+    },
+  });
+}
+
+function addMemberForm(team) {
+  const eligible = peopleList().filter((p) => p.joined && (p.invited || p.uid === state.user.uid) && !team.memberIds.includes(p.uid));
+  if (!eligible.length) {
+    toast("Everyone who has signed up is already in this team. People appear here once they’ve created their account.");
+    return;
+  }
+  openForm({
+    title: `Add to ${team.name}`,
+    submit: "Add member",
+    values: { uid: eligible[0].uid },
+    fields: [{
+      name: "uid", label: "Person", type: "select", wide: true,
+      options: eligible.map((p) => [p.uid, `${p.name || p.email} (${p.email})`]),
+      hint: "Only people who have created their account are listed.",
+    }],
+    onSubmit: ({ uid }) => {
+      const p = eligible.find((x) => x.uid === uid);
+      updateDoc(doc(db, "workspaces", team.id), {
+        memberIds: arrayUnion(uid), [`members.${uid}`]: { name: p.name || "", email: p.email },
+      }).then(() => toast(`${p.name || p.email} added to ${team.name}`)).catch(fail);
+    },
+  });
+}
+
+function removeMember(teamId, uid) {
+  const t = state.teams.find((x) => x.id === teamId);
+  if (!t) return;
+  const m = t.members?.[uid] || {};
+  if (!confirm(`Remove ${m.name || m.email || "this person"} from ${t.name}? They’ll lose access to its contacts and deals.`)) return;
+  updateDoc(doc(db, "workspaces", teamId), { memberIds: arrayRemove(uid), [`members.${uid}`]: deleteField() })
+    .then(() => toast("Removed from team")).catch(fail);
+}
+
+async function deleteTeam(teamId) {
+  const t = state.teams.find((x) => x.id === teamId);
+  if (!t) return;
+  if (!confirm(`Delete ${t.name} and all of its contacts, deals and activity? This can’t be undone.`)) return;
+  const uid = state.user.uid;
+  const tref = doc(db, "workspaces", teamId);
+  try {
+    if (!t.memberIds.includes(uid)) {
+      await updateDoc(tref, { memberIds: arrayUnion(uid), [`members.${uid}`]: { name: state.name, email: state.email } });
+    }
+    for (const name of COLS) {
+      const snap = await getDocs(collection(tref, name));
+      for (let i = 0; i < snap.docs.length; i += 400) {
+        const b = writeBatch(db);
+        snap.docs.slice(i, i + 400).forEach((d) => b.delete(d.ref));
+        await b.commit();
+      }
+    }
+    await deleteDoc(tref);
+    toast("Team deleted");
+  } catch (err) { toast(`Couldn’t delete team: ${err.message}`); }
+}
+
+// ---------- Forms ----------
+const dlg = $("#dlg");
+
+function fieldHtml(f, v = "") {
+  const id = `f-${f.name}`;
+  const req = f.required ? "required" : "";
+  let input;
+  if (f.type === "textarea") {
+    input = `<textarea id="${id}" name="${f.name}" rows="3" ${req}>${esc(v)}</textarea>`;
+  } else if (f.type === "select") {
+    input = `<select id="${id}" name="${f.name}">${f.options.map((o) => {
+      const [val, lab] = Array.isArray(o) ? o : [o, o];
+      return `<option value="${esc(val)}" ${String(val) === String(v) ? "selected" : ""}>${esc(lab)}</option>`;
+    }).join("")}</select>`;
+  } else {
+    const extra = f.type === "number" ? 'min="0" step="any" inputmode="decimal"' : "";
+    input = `<input id="${id}" name="${f.name}" type="${f.type || "text"}" value="${esc(v)}" ${req} ${extra}>`;
+  }
+  return `<label class="field ${f.wide ? "wide" : ""}" for="${id}">
+    <span>${esc(f.label)}</span>${input}${f.hint ? `<small>${esc(f.hint)}</small>` : ""}
+  </label>`;
+}
+
+function openForm({ title, fields, values = {}, submit = "Save", onSubmit, onDelete, deleteLabel }) {
+  dlg.innerHTML = `<form class="sheet" novalidate>
+    <h2>${esc(title)}</h2>
+    <div class="grid">${fields.map((f) => fieldHtml(f, values[f.name] ?? "")).join("")}</div>
+    <div class="actions">
+      ${onDelete ? `<button type="button" class="btn ghost danger-text" data-delete>${esc(deleteLabel)}</button>` : ""}
+      <span class="spacer"></span>
+      <button type="button" class="btn ghost" data-close>Cancel</button>
+      <button type="submit" class="btn primary">${esc(submit)}</button>
+    </div>
+  </form>`;
+  const form = $("form", dlg);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (!form.reportValidity()) return;
+    const data = Object.fromEntries(new FormData(form));
+    for (const f of fields) {
+      if (f.type === "number") data[f.name] = data[f.name] === "" ? 0 : Number(data[f.name]);
+      else if (typeof data[f.name] === "string") data[f.name] = data[f.name].trim();
+    }
+    dlg.close();
+    onSubmit(data);
+  });
+  $("[data-close]", dlg).onclick = () => dlg.close();
+  if (onDelete) $("[data-delete]", dlg).onclick = () => { if (onDelete()) dlg.close(); };
+  dlg.showModal();
+  form.querySelector("input, select, textarea")?.focus();
+}
+
+function contactForm(c) {
+  openForm({
+    title: c ? "Edit contact" : "Add contact",
+    submit: c ? "Save changes" : "Add contact",
+    values: c || { status: "Lead" },
+    fields: [
+      { name: "name", label: "Name", required: true },
+      { name: "company", label: "Company" },
+      { name: "email", label: "Email", type: "email" },
+      { name: "phone", label: "Phone", type: "tel" },
+      { name: "status", label: "Status", type: "select", options: STATUSES },
+      { name: "followUp", label: "Next follow-up", type: "date" },
+      { name: "notes", label: "Notes", type: "textarea", wide: true },
+    ],
+    onSubmit: (data) => {
+      const id = save("contacts", data, c?.id);
+      toast(c ? "Changes saved" : "Contact added");
+      if (!c) { state.view = "contacts"; state.contactId = id; render(); }
+    },
+  });
+}
+
+function logForm(contactId) {
+  const c = byId("contacts", contactId);
+  if (!c) return;
+  const t = today();
+  openForm({
+    title: `Log contact with ${c.name}`,
+    submit: "Save to log",
+    values: { date: t, type: "Call", followUp: c.followUp && c.followUp > t ? c.followUp : addDays(t, 7) },
+    fields: [
+      { name: "date", label: "Date", type: "date", required: true },
+      { name: "type", label: "Type", type: "select", options: TYPES },
+      { name: "summary", label: "What happened", type: "textarea", required: true, wide: true },
+      { name: "followUp", label: "Next follow-up", type: "date", wide: true, hint: "Leave empty if no follow-up is needed." },
+    ],
+    onSubmit: ({ followUp, ...entry }) => {
+      save("interactions", { ...entry, contactId });
+      const lastContacted = entry.date > (c.lastContacted || "") ? entry.date : (c.lastContacted || "");
+      save("contacts", { followUp: followUp || "", lastContacted }, contactId);
+      toast("Saved to log");
+    },
+  });
+}
+
+function dealForm(deal, contactId = "") {
+  if (!state.contacts.length) { toast("Add a contact first, then create a deal for them."); return; }
+  const options = [...state.contacts].sort(byName).map((c) => [c.id, c.company ? `${c.name} (${c.company})` : c.name]);
+  openForm({
+    title: deal ? "Edit deal" : "Add deal",
+    submit: deal ? "Save changes" : "Add deal",
+    values: deal || { contactId: contactId || options[0][0], stage: "New lead" },
+    fields: [
+      { name: "title", label: "What you’re selling", required: true, wide: true },
+      { name: "contactId", label: "Customer", type: "select", options },
+      { name: "amount", label: `Value (${CURRENCY})`, type: "number" },
+      { name: "stage", label: "Stage", type: "select", options: STAGES },
+      { name: "closeDate", label: "Expected close", type: "date" },
+      { name: "wonDate", label: "Date won", type: "date", hint: "Counts toward sales totals. Set to today automatically when marked Won." },
+      { name: "notes", label: "Notes", type: "textarea", wide: true },
+    ],
+    deleteLabel: "Delete deal",
+    onDelete: deal ? () => {
+      if (!confirm(`Delete “${deal.title}”? This can’t be undone.`)) return false;
+      deleteDoc(ref("deals", deal.id)).catch(fail);
+      toast("Deal deleted");
+      return true;
+    } : null,
+    onSubmit: (data) => {
+      data.wonDate = data.stage === "Won" ? (data.wonDate || today()) : "";
+      save("deals", data, deal?.id);
+      toast(deal ? "Changes saved" : "Deal added");
+    },
+  });
+}
+
+function setStage(id, stage) {
+  const d = byId("deals", id);
+  if (!d) return;
+  save("deals", { stage, wonDate: stage === "Won" ? (d.wonDate || today()) : "" }, id);
+  if (stage === "Won") toast(`Marked as won: ${money.format(Number(d.amount) || 0)}`);
+}
+
+function deleteContact(id) {
+  const c = byId("contacts", id);
+  if (!c) return;
+  const deals = state.deals.filter((d) => d.contactId === id);
+  const ints = state.interactions.filter((i) => i.contactId === id);
+  const extra = deals.length || ints.length
+    ? ` This also deletes ${plural(deals.length, "deal", "deals")} and ${plural(ints.length, "log entry", "log entries")}.` : "";
+  if (!confirm(`Delete ${c.name}?${extra} This can’t be undone.`)) return;
+  const b = writeBatch(db);
+  b.delete(ref("contacts", id));
+  deals.forEach((d) => b.delete(ref("deals", d.id)));
+  ints.forEach((i) => b.delete(ref("interactions", i.id)));
+  b.commit().catch(fail);
+  state.contactId = null;
+  render();
+  toast("Contact deleted");
+}
+
+function deleteInteraction(id) {
+  if (!confirm("Delete this log entry?")) return;
+  deleteDoc(ref("interactions", id)).catch(fail);
+}
+
+// ---------- Events ----------
+const CLICK_TARGETS = [
+  "[data-view]", "[data-open-contact]", "[data-back]", "[data-add-contact]", "[data-edit-contact]",
+  "[data-delete-contact]", "[data-log]", "[data-add-deal]", "[data-edit-deal]", "[data-delete-interaction]",
+  "[data-invite]", "[data-invite-msg]", "[data-revoke]", "[data-grant]", "[data-create-team]",
+  "[data-team-add]", "[data-team-rename]", "[data-team-delete]", "[data-team-remove]",
+].join(",");
+
+document.addEventListener("click", (e) => {
+  const always = e.target.closest("[data-signout],[data-auth-mode],[data-retry]");
+  if (always) {
+    if ("signout" in always.dataset) signOut(auth);
+    else if ("retry" in always.dataset) boot(auth.currentUser);
+    else renderAuth(always.dataset.authMode);
+    return;
+  }
+  const t = e.target.closest(CLICK_TARGETS);
+  if (!t || document.body.dataset.auth !== "in" || dlg.contains(t)) return;
+  const d = t.dataset;
+  const team = (id) => state.teams.find((x) => x.id === id);
+  if ("view" in d) { e.preventDefault(); state.view = d.view; state.contactId = null; render(); scrollTo(0, 0); }
+  else if ("openContact" in d) { state.view = "contacts"; state.contactId = d.openContact; render(); scrollTo(0, 0); }
+  else if ("back" in d) { state.contactId = null; render(); }
+  else if ("addContact" in d) contactForm();
+  else if ("editContact" in d) contactForm(byId("contacts", d.editContact));
+  else if ("deleteContact" in d) deleteContact(d.deleteContact);
+  else if ("log" in d) logForm(d.log);
+  else if ("addDeal" in d) dealForm(null, d.addDeal);
+  else if ("editDeal" in d) dealForm(byId("deals", d.editDeal));
+  else if ("deleteInteraction" in d) deleteInteraction(d.deleteInteraction);
+  else if ("invite" in d) inviteForm();
+  else if ("inviteMsg" in d) inviteMessage(d.inviteMsg, peopleList().find((p) => p.email === d.inviteMsg)?.name);
+  else if ("revoke" in d) revokeAccess(d.revoke);
+  else if ("grant" in d) grantAccess(d.grant);
+  else if ("createTeam" in d) teamForm();
+  else if ("teamAdd" in d) { const x = team(d.teamAdd); if (x) addMemberForm(x); }
+  else if ("teamRename" in d) { const x = team(d.teamRename); if (x) teamForm(x); }
+  else if ("teamDelete" in d) deleteTeam(d.teamDelete);
+  else if ("teamRemove" in d) { const [tid, uid] = d.teamRemove.split("|"); removeMember(tid, uid); }
+});
+
+document.addEventListener("change", (e) => {
+  if (e.target.id === "ws-switch") { switchWorkspace(e.target.value); scrollTo(0, 0); return; }
+  const s = e.target.closest("[data-stage-for]");
+  if (s) setStage(s.dataset.stageFor, s.value);
+  if (e.target.id === "status-filter") { state.statusFilter = e.target.value; renderContactList(); }
+});
+
+document.addEventListener("input", (e) => {
+  if (e.target.id === "search") { state.search = e.target.value; renderContactList(); }
+});
+</script>
 </body>
 </html>
