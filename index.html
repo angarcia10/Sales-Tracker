@@ -4,8 +4,10 @@
 
   SETUP
   1. Paste your Firebase values into the "STEP 1" section near the top of the <script> below.
-  2. In Firebase: Firestore Database → Rules tab → replace everything with the rules below → Publish.
-  3. Upload this file to your GitHub repo as index.html and turn on GitHub Pages.
+  2. In Firebase: Authentication → Sign-in method → enable Google (and Email/Password if you want it).
+     Authentication → Settings → Authorized domains → add YOUR-USERNAME.github.io
+  3. In Firebase: Firestore Database → Rules tab → replace everything with the rules below → Publish.
+  4. Upload this file to your GitHub repo as index.html and turn on GitHub Pages.
 
   ===== FIRESTORE SECURITY RULES (copy everything between the lines) =====
 rules_version = '2';
@@ -428,6 +430,9 @@ a.btn { text-decoration: none; display: inline-block; }
   .person-actions { grid-column: 1 / -1; justify-content: flex-start; }
   .actions { flex-wrap: wrap; }
 }
+.google { display: flex; align-items: center; justify-content: center; gap: 10px; }
+.divider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 14px; margin: 0; }
+.divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 </style>
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📇</text></svg>">
 </head>
@@ -457,6 +462,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
 import {
   getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
   updateProfile, sendEmailVerification, sendPasswordResetEmail, signOut,
+  GoogleAuthProvider, signInWithPopup,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
@@ -675,7 +681,19 @@ const authMessage = (err) => ({
   "auth/network-request-failed": "No connection. Check your internet and try again.",
   "auth/operation-not-allowed": "Account creation is turned off for this app. Ask the admin to turn it on.",
   "auth/admin-restricted-operation": "Account creation is turned off for this app. Ask the admin to turn it on.",
-}[err.code] || err.message);
+  "auth/popup-blocked": "Your browser blocked the Google sign-in window. Allow pop-ups for this site, then try again.",
+  "auth/unauthorized-domain": "This web address isn’t allowed to use Google sign-in yet. In Firebase, add it under Authentication → Settings → Authorized domains.",
+  "auth/account-exists-with-different-credential": "This email already has an account with a different sign-in method. Sign in with your email and password instead.",
+  "auth/cancelled-popup-request": "",
+  "auth/popup-closed-by-user": "",
+}[err.code] ?? err.message);
+
+async function signInWithGoogle(errEl) {
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: "select_account" });
+  try { await signInWithPopup(auth, provider); }
+  catch (err) { errEl.textContent = authMessage(err); }
+}
 
 function renderAuth(mode) {
   const signup = mode === "signup";
@@ -683,6 +701,11 @@ function renderAuth(mode) {
     <form class="login" id="auth-form">
       <h1>${signup ? "Create your account" : "Customer Book"}</h1>
       <p class="sub">${signup ? "Use the email address your invite was sent to." : "Sign in to see your contacts and sales."}</p>
+      <button type="button" class="btn full google" id="google">
+        <svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.4 30.2 0 24 0 14.6 0 6.6 5.4 2.6 13.3l7.8 6C12.3 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4 7.1-10 7.1-17.5z"/><path fill="#FBBC05" d="M10.4 28.7c-.5-1.4-.8-3-.8-4.7s.3-3.3.8-4.7l-7.8-6C.9 16.6 0 20.2 0 24s.9 7.4 2.6 10.7l7.8-6z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.5-5.8c-2.1 1.4-4.9 2.3-8.4 2.3-6.3 0-11.7-4.1-13.6-9.8l-7.8 6C6.6 42.6 14.6 48 24 48z"/></svg>
+        Continue with Google
+      </button>
+      <p class="divider"><span>or use email</span></p>
       ${signup ? `<label class="field"><span>Your name</span><input name="name" autocomplete="name" required></label>` : ""}
       <label class="field"><span>Email</span><input name="email" type="email" autocomplete="${signup ? "email" : "username"}" required></label>
       <label class="field"><span>Password</span>
@@ -698,6 +721,7 @@ function renderAuth(mode) {
     </form>`;
 
   const form = $("#auth-form"), errEl = $("#auth-error");
+  $("#google").onclick = () => signInWithGoogle(errEl);
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     const f = new FormData(form);
@@ -1081,8 +1105,9 @@ function inviteMessage(email, name) {
 You’ve been invited to Customer Book, where we track contacts and sales.
 
 1. Go to ${url}
-2. Select “Create your account” and sign up with ${email}
-3. Confirm your email using the link you’ll receive, then come back to the app.
+2. Select “Continue with Google” and choose ${email}
+   (or select “Create your account” and sign up with that email address)
+3. If you used email sign-up, confirm your email using the link you’ll receive.
 
 ${state.name}`;
   dlg.innerHTML = `<div class="sheet">
