@@ -27,7 +27,7 @@ service cloud.firestore {
         && request.auth.token.email_verified == true
         && request.auth.token.email.lower() in [
           "angarcia1001@gmail.com",
-          "Jasonlarsen92@gmail.com"
+          "jasonlarsen92@gmail.com"
         ];
     }
 
@@ -478,7 +478,7 @@ const firebaseConfig = {
   projectId: "sales-tracker-5726a",
   storageBucket: "sales-tracker-5726a.firebasestorage.app",
   messagingSenderId: "604068387467",
-  appId: "1:604068387467:web:a54fd0883f935ea382d28e"
+  appId: "1:604068387467:web:a54fd0883f935ea382d28e",
 };
 
 // Currency for deal values, e.g. "USD", "EUR", "GBP", "AUD".
@@ -497,8 +497,8 @@ const GOOGLE_CLIENT_ID = "PASTE_YOUR_WEB_CLIENT_ID";
 //  list in your Firestore rules (top of this file). Keep both lists the same.
 // =====================================================================
 const ALLOWED_EMAILS = [
-  "you@gmail.com",
-  "teammate@gmail.com",
+  "angarcia1001@gmail.com",
+  "jasonlarsen92@gmail.com",
 ];
 // =====================================================================
 
