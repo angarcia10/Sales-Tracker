@@ -1,76 +1,74 @@
 <!doctype html>
 <!--
-  Customer Book: a shareable, invite-only CRM. Everything is in this one file.
+  Customer Book: a shareable CRM. Everything is in this one file.
+  Sign-in is Google only, and only the email addresses you list can get in.
 
   SETUP
-  1. Paste your Firebase values into the "STEP 1" section near the top of the <script> below.
-  2. In Firebase: Authentication → Sign-in method → enable Google (and Email/Password if you want it).
-     Authentication → Settings → Authorized domains → add YOUR-USERNAME.github.io
-  3. In Firebase: Firestore Database → Rules tab → replace everything with the rules below → Publish.
-  4. Upload this file to your GitHub repo as index.html and turn on GitHub Pages.
+  1. STEP 1 (near the top of the <script> below): paste your Firebase values.
+  2. STEP 2 (just below it): list the Google accounts allowed to sign in.
+  3. Firebase → Authentication → Sign-in method → enable Google.
+     Firebase → Authentication → Settings → Authorized domains → add YOUR-USERNAME.github.io
+  4. Firebase → Firestore Database → Rules tab → replace everything with the rules below,
+     put the SAME email list into them, and click Publish.
+  5. Upload this file to your GitHub repo as index.html.
+
+  ADDING OR REMOVING SOMEONE: edit the email list in BOTH places (STEP 2 in this file, and the
+  rules in Firebase), publish the rules, and re-upload this file.
 
   ===== FIRESTORE SECURITY RULES (copy everything between the lines) =====
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    function signedIn()  { return request.auth != null; }
-    function myEmail()   { return request.auth.token.email.lower(); }
-    function verified()  { return signedIn() && request.auth.token.email_verified == true; }
-    function isAdmin()   { return verified() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)); }
-    function invited()   { return verified() && exists(/databases/$(database)/documents/invites/$(myEmail())); }
-    function hasAccess() { return isAdmin() || invited(); }
-
-    // Admins are added by hand in the Firebase console (doc ID = the admin's user UID).
-    match /admins/{uid} {
-      allow get: if signedIn() && request.auth.uid == uid;
+    // WHO CAN SIGN IN. Keep this list the same as ALLOWED_EMAILS in index.html.
+    // Lowercase, in quotes, separated by commas.
+    function allowed() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email.lower() in [
+          "angarcia1001@gmail.com",
+          "Jasonlarsen92@gmail.com"
+        ];
     }
 
-    // One invite per email address (doc ID = lowercase email). Only admins manage invites.
-    match /invites/{inviteEmail} {
-      allow get: if verified() && (inviteEmail == myEmail() || isAdmin());
-      allow list, delete: if isAdmin();
-      allow create, update: if isAdmin()
-        && inviteEmail == inviteEmail.lower()
-        && request.resource.data.email == inviteEmail;
-    }
-
-    // Basic profile so the admin can see who has joined.
+    // Names and emails of people who have signed in (used to add people to teams).
     match /users/{uid} {
-      allow get: if signedIn() && (request.auth.uid == uid || isAdmin());
-      allow list: if isAdmin();
-      allow create, update: if hasAccess()
-        && request.auth.uid == uid
-        && request.resource.data.email == myEmail();
+      allow read: if allowed();
+      allow create, update: if allowed() && request.auth.uid == uid
+        && request.resource.data.email == request.auth.token.email.lower();
     }
 
-    // A workspace is either someone's private book (ID = their UID) or a team book.
+    // A book: someone's private book (ID = their user ID) or a team book.
     match /workspaces/{wsId} {
-      allow get: if hasAccess() && (wsId == request.auth.uid || request.auth.uid in resource.data.memberIds
-                                    || (isAdmin() && resource.data.type == 'team'));
-      allow list: if hasAccess() && (request.auth.uid in resource.data.memberIds
-                                     || (isAdmin() && resource.data.type == 'team'));
+      allow get: if allowed() && (wsId == request.auth.uid || request.auth.uid in resource.data.memberIds);
+      allow list: if allowed() && request.auth.uid in resource.data.memberIds;
 
-      allow create: if hasAccess() && (
+      allow create: if allowed() && (
           (wsId == request.auth.uid
             && request.resource.data.type == 'personal'
             && request.resource.data.memberIds == [request.auth.uid])
-        || (isAdmin() && request.resource.data.type == 'team'));
+        || (request.resource.data.type == 'team'
+            && request.resource.data.createdBy == request.auth.uid
+            && request.auth.uid in request.resource.data.memberIds));
 
-      // Only admins change teams (name, members). Private books can't be shared.
-      allow update: if isAdmin() && resource.data.type == 'team' && request.resource.data.type == 'team';
-      allow delete: if isAdmin() && resource.data.type == 'team';
+      // Only the person who created a team can rename it or change its members.
+      allow update: if allowed()
+        && resource.data.type == 'team'
+        && resource.data.createdBy == request.auth.uid
+        && request.resource.data.type == 'team'
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.auth.uid in request.resource.data.memberIds;
+      allow delete: if allowed() && resource.data.type == 'team' && resource.data.createdBy == request.auth.uid;
 
-      // Contacts, deals and activity: any member of the workspace can read and write.
+      // Contacts, deals and activity: any member of the book can read and write.
       match /{col}/{docId} {
-        allow read, write: if hasAccess()
+        allow read, write: if allowed()
           && col in ['contacts', 'deals', 'interactions']
           && request.auth.uid in get(/databases/$(database)/documents/workspaces/$(wsId)).data.memberIds;
       }
     }
   }
 }
-
   =========================================================================
 -->
 <html lang="en">
@@ -392,7 +390,6 @@ dialog::backdrop { background: rgba(8, 18, 14, .5); }
   width: auto; max-width: 220px; font-size: 15px; font-weight: 600;
   padding: 6px 30px 6px 10px; background-color: var(--soft); border-color: transparent;
 }
-body[data-admin="no"] .tabs [data-view="people"] { display: none; }
 .book { margin: 0 0 6px; font-size: 14px; font-weight: 600; color: var(--muted); }
 .page-head + .book, #contacts-shell > .book { margin-bottom: 8px; }
 .switch { margin: 0; text-align: center; font-size: 14px; color: var(--muted); }
@@ -430,6 +427,7 @@ a.btn { text-decoration: none; display: inline-block; }
   .person-actions { grid-column: 1 / -1; justify-content: flex-start; }
   .actions { flex-wrap: wrap; }
 }
+.google-slot { display: flex; justify-content: center; min-height: 44px; }
 .google { display: flex; align-items: center; justify-content: center; gap: 10px; }
 .divider { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 14px; margin: 0; }
 .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--line); }
@@ -444,7 +442,7 @@ a.btn { text-decoration: none; display: inline-block; }
       <button data-view="today">Today</button>
       <button data-view="contacts">Contacts</button>
       <button data-view="deals">Deals</button>
-      <button data-view="people">People</button>
+      <button data-view="teams">Teams</button>
     </nav>
     <div class="account">
       <span id="who"></span>
@@ -460,9 +458,8 @@ a.btn { text-decoration: none; display: inline-block; }
   <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
-  getAuth, onAuthStateChanged, signInWithEmailAndPassword, createUserWithEmailAndPassword,
-  updateProfile, sendEmailVerification, sendPasswordResetEmail, signOut,
-  GoogleAuthProvider, signInWithPopup,
+  getAuth, onAuthStateChanged, signOut,
+  GoogleAuthProvider, signInWithPopup, signInWithCredential,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import {
   initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
@@ -483,8 +480,26 @@ const firebaseConfig = {
   messagingSenderId: "604068387467",
   appId: "1:604068387467:web:a54fd0883f935ea382d28e"
 };
+
 // Currency for deal values, e.g. "USD", "EUR", "GBP", "AUD".
 const CURRENCY = "USD";
+
+// OPTIONAL: only fill this in if Google sign-in fails on phones with a
+// "missing initial state" page. Leave it as-is otherwise.
+// Firebase → Authentication → Sign-in method → Google → Web SDK configuration → Web client ID
+const GOOGLE_CLIENT_ID = "PASTE_YOUR_WEB_CLIENT_ID";
+
+// =====================================================================
+//  STEP 2: WHO CAN SIGN IN
+//  The Google accounts allowed to use Customer Book. Lowercase, in quotes,
+//  one per line, each followed by a comma.
+//  This list only decides what the page shows. The REAL lock is the same
+//  list in your Firestore rules (top of this file). Keep both lists the same.
+// =====================================================================
+const ALLOWED_EMAILS = [
+  "you@gmail.com",
+  "teammate@gmail.com",
+];
 // =====================================================================
 
 const $ = (sel, el = document) => el.querySelector(sel);
@@ -509,10 +524,10 @@ const TYPES = ["Call", "Email", "Meeting", "Message", "Other"];
 const COLS = ["contacts", "deals", "interactions"];
 
 const state = {
-  user: null, name: "", email: "", isAdmin: false,
+  user: null, name: "", email: "",
   workspaces: [], wsId: null,
   contacts: [], deals: [], interactions: [],
-  invites: [], users: [], teams: [],
+  users: [],
   view: "today", contactId: null, search: "", statusFilter: "All",
 };
 const unsubCore = [], unsubData = [];
@@ -575,6 +590,7 @@ function toast(msg) {
 const setAuth = (v) => { document.body.dataset.auth = v; };
 
 // ---------- Sign-in & access ----------
+const ALLOWED = ALLOWED_EMAILS.map((e) => String(e).trim().toLowerCase()).filter(Boolean);
 let bootRun = 0;
 onAuthStateChanged(auth, (user) => boot(user));
 
@@ -582,30 +598,20 @@ async function boot(user) {
   const run = ++bootRun;
   stopAll(unsubCore); stopAll(unsubData);
   Object.assign(state, {
-    user, isAdmin: false, workspaces: [], wsId: null, contacts: [], deals: [], interactions: [],
-    invites: [], users: [], teams: [], view: "today", contactId: null,
+    user, workspaces: [], wsId: null, contacts: [], deals: [], interactions: [],
+    users: [], view: "today", contactId: null,
   });
-  document.body.dataset.admin = "no";
   $(".switcher").hidden = true;
 
-  if (!user) { setAuth("out"); renderAuth("signin"); return; }
-  if (!user.emailVerified) { setAuth("out"); renderVerify(); return; }
+  if (!user) { setAuth("out"); renderSignIn(); return; }
+  state.email = (user.email || "").toLowerCase();
+  if (!ALLOWED.includes(state.email)) { setAuth("out"); renderNotAllowed(); return; }
 
   setAuth("loading");
   main.innerHTML = `<p class="loading">Loading…</p>`;
-  state.email = user.email.toLowerCase();
   state.name = user.displayName || state.email.split("@")[0];
 
   try {
-    const [adminSnap, inviteSnap] = await Promise.all([
-      getDoc(doc(db, "admins", user.uid)).catch(() => null),
-      getDoc(doc(db, "invites", state.email)).catch(() => null),
-    ]);
-    if (run !== bootRun) return;
-    state.isAdmin = !!adminSnap?.exists();
-    if (!state.isAdmin && !inviteSnap?.exists()) { setAuth("out"); renderNoAccess(); return; }
-    if (!user.displayName && inviteSnap?.data()?.name) state.name = inviteSnap.data().name;
-
     setDoc(doc(db, "users", user.uid), { email: state.email, name: state.name, lastSeen: serverTimestamp() }, { merge: true }).catch(fail);
     const personal = doc(db, "workspaces", user.uid);
     if (!(await getDoc(personal)).exists()) {
@@ -622,7 +628,6 @@ async function boot(user) {
   }
   if (run !== bootRun) return;
 
-  document.body.dataset.admin = state.isAdmin ? "yes" : "no";
   $("#who").textContent = state.name;
   setAuth("in");
 
@@ -639,15 +644,10 @@ async function boot(user) {
     (err) => toast(`Couldn't load your books: ${err.message}`),
   ));
 
-  if (state.isAdmin) {
-    const listen = (q, key) => unsubCore.push(onSnapshot(q, (snap) => {
-      state[key] = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      if (state.view === "people") render();
-    }, (err) => toast(`Couldn't load ${key}: ${err.message}`)));
-    listen(collection(db, "invites"), "invites");
-    listen(collection(db, "users"), "users");
-    listen(query(collection(db, "workspaces"), where("type", "==", "team")), "teams");
-  }
+  unsubCore.push(onSnapshot(collection(db, "users"), (snap) => {
+    state.users = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    if (state.view === "teams") render();
+  }, () => { /* not critical */ }));
 }
 
 function switchWorkspace(id) {
@@ -673,116 +673,85 @@ function renderSwitcher() {
 }
 
 const authMessage = (err) => ({
-  "auth/invalid-credential": "That email and password don’t match.",
-  "auth/invalid-email": "Enter a valid email address.",
-  "auth/email-already-in-use": "There’s already an account with this email. Sign in instead.",
-  "auth/weak-password": "Choose a longer password (at least 8 characters).",
-  "auth/too-many-requests": "Too many attempts. Wait a few minutes and try again.",
-  "auth/network-request-failed": "No connection. Check your internet and try again.",
-  "auth/operation-not-allowed": "Account creation is turned off for this app. Ask the admin to turn it on.",
-  "auth/admin-restricted-operation": "Account creation is turned off for this app. Ask the admin to turn it on.",
   "auth/popup-blocked": "Your browser blocked the Google sign-in window. Allow pop-ups for this site, then try again.",
   "auth/unauthorized-domain": "This web address isn’t allowed to use Google sign-in yet. In Firebase, add it under Authentication → Settings → Authorized domains.",
-  "auth/account-exists-with-different-credential": "This email already has an account with a different sign-in method. Sign in with your email and password instead.",
+  "auth/operation-not-allowed": "Google sign-in isn’t turned on yet. In Firebase, enable it under Authentication → Sign-in method.",
+  "auth/network-request-failed": "No connection. Check your internet and try again.",
   "auth/cancelled-popup-request": "",
   "auth/popup-closed-by-user": "",
-}[err.code] ?? err.message);
+}[err.code] ?? `Sign-in failed: ${err.code || err.message}`);
 
-async function signInWithGoogle(errEl) {
+const hasGoogleClientId = () => GOOGLE_CLIENT_ID && !GOOGLE_CLIENT_ID.startsWith("PASTE");
+
+let gisReady = null;
+function loadGoogleScript() {
+  gisReady ||= new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "https://accounts.google.com/gsi/client";
+    s.async = true;
+    s.onload = resolve;
+    s.onerror = () => { gisReady = null; reject(new Error("Couldn’t load Google sign-in. Check your connection and reload.")); };
+    document.head.appendChild(s);
+  });
+  return gisReady;
+}
+
+// Optional: Google's own button, for phones where the pop-up method fails.
+async function mountGoogleButton() {
+  const slot = $("#google-slot");
+  try {
+    await loadGoogleScript();
+    if (!slot.isConnected) return;
+    google.accounts.id.initialize({
+      client_id: GOOGLE_CLIENT_ID,
+      ux_mode: "popup",
+      auto_select: false,
+      callback: async ({ credential }) => {
+        try { await signInWithCredential(auth, GoogleAuthProvider.credential(credential)); }
+        catch (err) { const e = $("#auth-error"); if (e) e.textContent = authMessage(err); }
+      },
+    });
+    google.accounts.id.renderButton(slot, {
+      type: "standard", theme: "outline", size: "large", shape: "rectangular",
+      text: "continue_with", logo_alignment: "center",
+      width: Math.min(320, Math.max(200, slot.clientWidth || 320)),
+    });
+  } catch (err) {
+    const e = $("#auth-error"); if (e) e.textContent = err.message;
+  }
+}
+
+// Same method as the beta app: Firebase's Google pop-up.
+async function signInWithGoogle() {
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: "select_account" });
   try { await signInWithPopup(auth, provider); }
-  catch (err) { errEl.textContent = authMessage(err); }
+  catch (err) { const e = $("#auth-error"); if (e) e.textContent = authMessage(err); }
 }
 
-function renderAuth(mode) {
-  const signup = mode === "signup";
-  main.innerHTML = `
-    <form class="login" id="auth-form">
-      <h1>${signup ? "Create your account" : "Customer Book"}</h1>
-      <p class="sub">${signup ? "Use the email address your invite was sent to." : "Sign in to see your contacts and sales."}</p>
-      <button type="button" class="btn full google" id="google">
-        <svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.4 30.2 0 24 0 14.6 0 6.6 5.4 2.6 13.3l7.8 6C12.3 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4 7.1-10 7.1-17.5z"/><path fill="#FBBC05" d="M10.4 28.7c-.5-1.4-.8-3-.8-4.7s.3-3.3.8-4.7l-7.8-6C.9 16.6 0 20.2 0 24s.9 7.4 2.6 10.7l7.8-6z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.5-5.8c-2.1 1.4-4.9 2.3-8.4 2.3-6.3 0-11.7-4.1-13.6-9.8l-7.8 6C6.6 42.6 14.6 48 24 48z"/></svg>
-        Continue with Google
-      </button>
-      <p class="divider"><span>or use email</span></p>
-      ${signup ? `<label class="field"><span>Your name</span><input name="name" autocomplete="name" required></label>` : ""}
-      <label class="field"><span>Email</span><input name="email" type="email" autocomplete="${signup ? "email" : "username"}" required></label>
-      <label class="field"><span>Password</span>
-        <input name="password" type="password" autocomplete="${signup ? "new-password" : "current-password"}" ${signup ? 'minlength="8"' : ""} required>
-        ${signup ? "<small>At least 8 characters.</small>" : ""}
-      </label>
-      <p class="error" id="auth-error" role="alert"></p>
-      <button class="btn primary full">${signup ? "Create account" : "Sign in"}</button>
-      ${signup
-        ? `<p class="switch">Already have an account? <button type="button" class="link" data-auth-mode="signin">Sign in</button></p>`
-        : `<button type="button" class="link reset" id="reset">Forgot password?</button>
-           <p class="switch">Been invited? <button type="button" class="link" data-auth-mode="signup">Create your account</button></p>`}
-    </form>`;
+const GOOGLE_G = `<svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9 3.6l6.7-6.7C35.6 2.4 30.2 0 24 0 14.6 0 6.6 5.4 2.6 13.3l7.8 6C12.3 13.6 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4 7.1-10 7.1-17.5z"/><path fill="#FBBC05" d="M10.4 28.7c-.5-1.4-.8-3-.8-4.7s.3-3.3.8-4.7l-7.8-6C.9 16.6 0 20.2 0 24s.9 7.4 2.6 10.7l7.8-6z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.5-5.8c-2.1 1.4-4.9 2.3-8.4 2.3-6.3 0-11.7-4.1-13.6-9.8l-7.8 6C6.6 42.6 14.6 48 24 48z"/></svg>`;
 
-  const form = $("#auth-form"), errEl = $("#auth-error");
-  $("#google").onclick = () => signInWithGoogle(errEl);
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const f = new FormData(form);
-    const email = String(f.get("email")).trim(), password = String(f.get("password"));
-    const btn = form.querySelector(".primary");
-    btn.disabled = true;
-    try {
-      if (signup) {
-        const cred = await createUserWithEmailAndPassword(auth, email, password);
-        await updateProfile(cred.user, { displayName: String(f.get("name")).trim() });
-        await sendEmailVerification(cred.user);
-      } else {
-        await signInWithEmailAndPassword(auth, email, password);
-      }
-    } catch (err) { errEl.textContent = authMessage(err); btn.disabled = false; }
-  });
-  if (!signup) {
-    $("#reset").onclick = async () => {
-      const email = form.email.value.trim();
-      if (!email) { errEl.textContent = "Enter your email above, then select “Forgot password?” again."; return; }
-      try { await sendPasswordResetEmail(auth, email); toast("Password reset email sent"); }
-      catch (err) { errEl.textContent = authMessage(err); }
-    };
-  }
-  form.querySelector("input").focus();
-}
-
-function renderVerify() {
-  const u = auth.currentUser;
+function renderSignIn() {
   main.innerHTML = `
     <div class="login">
-      <h1>Confirm your email</h1>
-      <p>We sent a link to <strong>${esc(u.email)}</strong>. Open it, then come back here. Check your spam folder if it doesn’t arrive in a minute or two.</p>
+      <h1>Customer Book</h1>
+      <p class="sub">Sign in with your Google account to see your contacts and sales.</p>
+      ${hasGoogleClientId()
+        ? `<div id="google-slot" class="google-slot"></div>`
+        : `<button type="button" class="btn full google" id="google">${GOOGLE_G} Continue with Google</button>`}
       <p class="error" id="auth-error" role="alert"></p>
-      <button class="btn primary full" id="verified">I’ve confirmed my email</button>
-      <button class="btn full" id="resend">Send the link again</button>
-      <button class="link reset" data-signout>Sign out</button>
     </div>`;
-  $("#verified").onclick = async () => {
-    await auth.currentUser.reload();
-    if (!auth.currentUser.emailVerified) {
-      $("#auth-error").textContent = "This email isn’t confirmed yet. Open the link in the email we sent, then try again.";
-      return;
-    }
-    await auth.currentUser.getIdToken(true);
-    boot(auth.currentUser);
-  };
-  $("#resend").onclick = async () => {
-    try { await sendEmailVerification(auth.currentUser); toast("Link sent"); }
-    catch (err) { $("#auth-error").textContent = authMessage(err); }
-  };
+  if (hasGoogleClientId()) mountGoogleButton();
+  else $("#google").onclick = signInWithGoogle;
 }
 
-function renderNoAccess() {
+function renderNotAllowed() {
   main.innerHTML = `
     <div class="login">
-      <h1>You haven’t been invited yet</h1>
-      <p>You’re signed in as <strong>${esc(auth.currentUser.email)}</strong>, but this address doesn’t have access.
-         Ask the person who runs Customer Book to invite it, then select “Try again”.</p>
-      <button class="btn primary full" data-retry>Try again</button>
-      <button class="link reset" data-signout>Sign out</button>
+      <h1>Not authorized</h1>
+      <p>You’re signed in as <strong>${esc(auth.currentUser.email)}</strong>, which isn’t on the list of people who can use Customer Book.
+         Ask the person who manages the app to add this email, or sign in with a different Google account.</p>
+      <button class="btn primary full" data-signout>Use a different account</button>
     </div>`;
 }
 
@@ -791,7 +760,7 @@ function renderProblem(err) {
     <div class="login">
       <h1>Couldn’t load your account</h1>
       <p>${esc(err.message)}</p>
-      <p class="sub">If you just set up the app, check that the security rules (in the comment at the top of <code>index.html</code>) are published in Firebase.</p>
+      <p class="sub">Check that the Firestore rules (top of <code>index.html</code>) are published in Firebase, and that your email is in the list inside them as well as in STEP 2.</p>
       <button class="btn primary full" data-retry>Try again</button>
       <button class="link reset" data-signout>Sign out</button>
     </div>`;
@@ -800,7 +769,6 @@ function renderProblem(err) {
 // ---------- Rendering ----------
 function render() {
   if (!state.user || document.body.dataset.auth !== "in" || !state.wsId) return;
-  if (state.view === "people" && !state.isAdmin) state.view = "today";
   document.querySelectorAll(".tabs [data-view]").forEach((b) => {
     if (b.dataset.view === state.view) b.setAttribute("aria-current", "page");
     else b.removeAttribute("aria-current");
@@ -808,7 +776,7 @@ function render() {
   if (state.view === "today") renderToday();
   else if (state.view === "contacts") (state.contactId ? renderContact() : renderContacts());
   else if (state.view === "deals") renderDeals();
-  else renderPeople();
+  else renderTeams();
 }
 
 function bookLabel() {
@@ -1014,138 +982,44 @@ function renderDeals() {
     }).join("")}</div>`;
 }
 
-// ---------- People & teams (admin) ----------
-function peopleList() {
-  const map = new Map();
-  for (const u of state.users) map.set(u.email, { email: u.email, name: u.name, uid: u.id, joined: true, invited: false });
-  for (const i of state.invites) {
-    const p = map.get(i.id) || { email: i.id, name: i.name, joined: false };
-    p.invited = true;
-    p.name = p.name || i.name;
-    map.set(i.id, p);
-  }
-  return [...map.values()].sort((a, b) => (a.name || a.email).localeCompare(b.name || b.email));
-}
+// ---------- Teams ----------
+const teamsList = () => state.workspaces.filter((w) => w.type === "team").sort(byName);
+const findTeam = (id) => teamsList().find((t) => t.id === id);
 
-function renderPeople() {
-  const people = peopleList();
-  const teams = [...state.teams].sort(byName);
-  const teamsOf = (uid) => teams.filter((t) => uid && t.memberIds?.includes(uid)).map((t) => t.name);
-
+function renderTeams() {
+  const teams = teamsList();
   main.innerHTML = `
     <header class="page-head">
-      <h1>People</h1>
-      <button class="btn primary" data-invite>Invite someone</button>
+      <h1>Teams</h1>
+      <button class="btn primary" data-create-team>Create team</button>
     </header>
-    <p class="sub intro">Only people you invite can use Customer Book. Everyone gets their own private book, plus the books of any teams you add them to.</p>
-
-    <section class="block">
-      <h2>People with access <span class="count">${people.filter((p) => p.invited || p.uid === state.user.uid).length}</span></h2>
-      <ul class="people">${people.map((p) => {
-        const self = p.uid === state.user.uid;
-        const status = self ? ["admin", "You (admin)"] : !p.invited ? ["none", "No access"] : p.joined ? ["joined", "Joined"] : ["waiting", "Hasn’t signed up yet"];
-        const pteams = teamsOf(p.uid);
-        return `<li class="person">
-          <div class="who"><strong>${esc(p.name || p.email)}</strong><span class="sub">${esc(p.email)}</span></div>
-          <span class="chip ${status[0]}">${status[1]}</span>
-          <span class="sub teams-of">${pteams.length ? esc(pteams.join(", ")) : p.joined ? "No teams" : ""}</span>
-          <span class="person-actions">
-            ${p.invited && !p.joined ? `<button class="btn small" data-invite-msg="${esc(p.email)}">Invite message</button>` : ""}
-            ${p.invited && !self ? `<button class="btn small ghost danger-text" data-revoke="${esc(p.email)}">Remove access</button>` : ""}
-            ${!p.invited && !self ? `<button class="btn small" data-grant="${esc(p.email)}">Give access</button>` : ""}
-          </span>
-        </li>`;
-      }).join("") || `<li class="empty">No one yet. Invite someone to get started.</li>`}</ul>
-    </section>
-
-    <section class="block">
-      <div class="block-head"><h2>Teams <span class="count">${teams.length || ""}</span></h2><button class="btn small" data-create-team>Create team</button></div>
-      ${teams.length ? `<div class="teams">${teams.map((t) => `
-        <article class="team">
-          <header>
-            <h3>${esc(t.name)}</h3>
-            <span class="team-actions">
-              <button class="btn small" data-team-add="${esc(t.id)}">Add member</button>
-              <button class="btn small ghost" data-team-rename="${esc(t.id)}">Rename</button>
-              <button class="btn small ghost danger-text" data-team-delete="${esc(t.id)}">Delete</button>
-            </span>
-          </header>
-          <ul class="members">${(t.memberIds || []).map((uid) => {
-            const m = t.members?.[uid] || {};
-            return `<li><span>${esc(m.name || m.email || "Unknown")}${uid === state.user.uid ? " (you)" : ""}</span>
-              <button class="x" data-team-remove="${esc(t.id)}|${esc(uid)}" aria-label="Remove ${esc(m.name || m.email)} from ${esc(t.name)}">×</button></li>`;
-          }).join("") || `<li class="empty">No members</li>`}</ul>
-        </article>`).join("")}</div>`
-      : `<p class="empty">No teams yet. Create one to share a book of contacts and deals with a group.</p>`}
-    </section>`;
+    <p class="sub intro">Everyone has a private My book. A team shares one book of contacts and deals.
+      The person who creates a team adds and removes its members. Switch books from the menu at the top.</p>
+    ${teams.length ? `<div class="teams">${teams.map(teamCard).join("")}</div>`
+      : `<p class="empty">You’re not in any teams yet. Create one, or ask a teammate to add you to theirs.</p>`}`;
 }
 
-function inviteForm(prefill = {}) {
-  openForm({
-    title: "Invite someone",
-    submit: "Invite",
-    values: prefill,
-    fields: [
-      { name: "name", label: "Name", required: true },
-      { name: "email", label: "Email", type: "email", required: true },
-    ],
-    onSubmit: ({ name, email }) => {
-      const e = email.toLowerCase();
-      setDoc(doc(db, "invites", e), { email: e, name, invitedBy: state.user.uid, createdAt: serverTimestamp() })
-        .then(() => { if (!state.users.some((u) => u.email === e)) inviteMessage(e, name); else toast(`Access given to ${name}`); })
-        .catch(fail);
-    },
-  });
-}
-
-function inviteMessage(email, name) {
-  const url = location.origin + location.pathname;
-  const text = `Hi ${name || "there"},
-
-You’ve been invited to Customer Book, where we track contacts and sales.
-
-1. Go to ${url}
-2. Select “Continue with Google” and choose ${email}
-   (or select “Create your account” and sign up with that email address)
-3. If you used email sign-up, confirm your email using the link you’ll receive.
-
-${state.name}`;
-  dlg.innerHTML = `<div class="sheet">
-    <h2>Send ${esc(name || email)} their invite</h2>
-    <p class="sub">Customer Book can’t send emails itself, so send this message from your own email or chat app.</p>
-    <textarea class="invite-text" rows="10" readonly>${esc(text)}</textarea>
-    <div class="actions">
-      <span class="spacer"></span>
-      <button type="button" class="btn ghost" data-close>Done</button>
-      <a class="btn" href="mailto:${encodeURIComponent(email)}?subject=${encodeURIComponent("You’re invited to Customer Book")}&body=${encodeURIComponent(text)}">Open in email</a>
-      <button type="button" class="btn primary" data-copy>Copy message</button>
-    </div>
-  </div>`;
-  $("[data-close]", dlg).onclick = () => dlg.close();
-  $("[data-copy]", dlg).onclick = async () => {
-    try { await navigator.clipboard.writeText(text); toast("Message copied"); }
-    catch { $(".invite-text", dlg).select(); toast("Press Ctrl+C or Cmd+C to copy"); }
-  };
-  if (!dlg.open) dlg.showModal();
-}
-
-function revokeAccess(email) {
-  const p = peopleList().find((x) => x.email === email);
-  if (!confirm(`Remove access for ${p?.name || email}? They’ll be signed out of everything, including their private book. You can give access again later.`)) return;
-  const b = writeBatch(db);
-  b.delete(doc(db, "invites", email));
-  if (p?.uid) {
-    state.teams.filter((t) => t.memberIds?.includes(p.uid)).forEach((t) => {
-      b.update(doc(db, "workspaces", t.id), { memberIds: arrayRemove(p.uid), [`members.${p.uid}`]: deleteField() });
-    });
-  }
-  b.commit().then(() => toast("Access removed")).catch(fail);
-}
-
-function grantAccess(email) {
-  const p = peopleList().find((x) => x.email === email);
-  setDoc(doc(db, "invites", email), { email, name: p?.name || "", invitedBy: state.user.uid, createdAt: serverTimestamp() })
-    .then(() => toast(`Access given to ${p?.name || email}`)).catch(fail);
+function teamCard(t) {
+  const mine = t.createdBy === state.user.uid;
+  const ownerName = t.members?.[t.createdBy]?.name || t.members?.[t.createdBy]?.email || "a teammate";
+  return `<article class="team">
+    <header>
+      <h3>${esc(t.name)}</h3>
+      <p class="sub">${mine ? "You manage this team" : `Managed by ${esc(ownerName)}`}</p>
+      <span class="team-actions">
+        ${t.id !== state.wsId ? `<button class="btn small primary" data-open-book="${esc(t.id)}">Open book</button>` : `<span class="chip joined">Open now</span>`}
+        ${mine ? `<button class="btn small" data-team-add="${esc(t.id)}">Add member</button>
+          <button class="btn small ghost" data-team-rename="${esc(t.id)}">Rename</button>
+          <button class="btn small ghost danger-text" data-team-delete="${esc(t.id)}">Delete</button>` : ""}
+      </span>
+    </header>
+    <ul class="members">${(t.memberIds || []).map((uid) => {
+      const m = t.members?.[uid] || {};
+      const canRemove = mine && uid !== t.createdBy;
+      return `<li><span>${esc(m.name || m.email || "Unknown")}${uid === state.user.uid ? " (you)" : ""}</span>
+        ${canRemove ? `<button class="x" data-team-remove="${esc(t.id)}|${esc(uid)}" aria-label="Remove ${esc(m.name || m.email)} from ${esc(t.name)}">×</button>` : ""}</li>`;
+    }).join("")}</ul>
+  </article>`;
 }
 
 function teamForm(team) {
@@ -1160,37 +1034,39 @@ function teamForm(team) {
         type: "team", name, memberIds: [state.user.uid],
         members: { [state.user.uid]: { name: state.name, email: state.email } },
         createdBy: state.user.uid, createdAt: serverTimestamp(),
-      }).then(() => toast(`Team created. Add members, then switch to it from the menu at the top.`)).catch(fail);
+      }).then(() => toast("Team created. Add members, then open its book.")).catch(fail);
     },
   });
 }
 
 function addMemberForm(team) {
-  const eligible = peopleList().filter((p) => p.joined && (p.invited || p.uid === state.user.uid) && !team.memberIds.includes(p.uid));
+  const eligible = state.users
+    .filter((u) => ALLOWED.includes(u.email) && !team.memberIds.includes(u.id))
+    .sort(byName);
   if (!eligible.length) {
-    toast("Everyone who has signed up is already in this team. People appear here once they’ve created their account.");
+    toast("No one else to add yet. People appear here after they sign in to Customer Book once.");
     return;
   }
   openForm({
     title: `Add to ${team.name}`,
     submit: "Add member",
-    values: { uid: eligible[0].uid },
+    values: { uid: eligible[0].id },
     fields: [{
       name: "uid", label: "Person", type: "select", wide: true,
-      options: eligible.map((p) => [p.uid, `${p.name || p.email} (${p.email})`]),
-      hint: "Only people who have created their account are listed.",
+      options: eligible.map((u) => [u.id, `${u.name || u.email} (${u.email})`]),
+      hint: "Only people on the allowed list who have signed in at least once are shown.",
     }],
     onSubmit: ({ uid }) => {
-      const p = eligible.find((x) => x.uid === uid);
+      const u = eligible.find((x) => x.id === uid);
       updateDoc(doc(db, "workspaces", team.id), {
-        memberIds: arrayUnion(uid), [`members.${uid}`]: { name: p.name || "", email: p.email },
-      }).then(() => toast(`${p.name || p.email} added to ${team.name}`)).catch(fail);
+        memberIds: arrayUnion(uid), [`members.${uid}`]: { name: u.name || "", email: u.email },
+      }).then(() => toast(`${u.name || u.email} added to ${team.name}`)).catch(fail);
     },
   });
 }
 
 function removeMember(teamId, uid) {
-  const t = state.teams.find((x) => x.id === teamId);
+  const t = findTeam(teamId);
   if (!t) return;
   const m = t.members?.[uid] || {};
   if (!confirm(`Remove ${m.name || m.email || "this person"} from ${t.name}? They’ll lose access to its contacts and deals.`)) return;
@@ -1199,15 +1075,11 @@ function removeMember(teamId, uid) {
 }
 
 async function deleteTeam(teamId) {
-  const t = state.teams.find((x) => x.id === teamId);
+  const t = findTeam(teamId);
   if (!t) return;
-  if (!confirm(`Delete ${t.name} and all of its contacts, deals and activity? This can’t be undone.`)) return;
-  const uid = state.user.uid;
+  if (!confirm(`Delete ${t.name} and all of its contacts, deals and activity for everyone? This can’t be undone.`)) return;
   const tref = doc(db, "workspaces", teamId);
   try {
-    if (!t.memberIds.includes(uid)) {
-      await updateDoc(tref, { memberIds: arrayUnion(uid), [`members.${uid}`]: { name: state.name, email: state.email } });
-    }
     for (const name of COLS) {
       const snap = await getDocs(collection(tref, name));
       for (let i = 0; i < snap.docs.length; i += 400) {
@@ -1383,22 +1255,21 @@ function deleteInteraction(id) {
 const CLICK_TARGETS = [
   "[data-view]", "[data-open-contact]", "[data-back]", "[data-add-contact]", "[data-edit-contact]",
   "[data-delete-contact]", "[data-log]", "[data-add-deal]", "[data-edit-deal]", "[data-delete-interaction]",
-  "[data-invite]", "[data-invite-msg]", "[data-revoke]", "[data-grant]", "[data-create-team]",
+  "[data-open-book]", "[data-create-team]",
   "[data-team-add]", "[data-team-rename]", "[data-team-delete]", "[data-team-remove]",
 ].join(",");
 
 document.addEventListener("click", (e) => {
-  const always = e.target.closest("[data-signout],[data-auth-mode],[data-retry]");
+  const always = e.target.closest("[data-signout],[data-retry]");
   if (always) {
-    if ("signout" in always.dataset) signOut(auth);
-    else if ("retry" in always.dataset) boot(auth.currentUser);
-    else renderAuth(always.dataset.authMode);
+    if ("signout" in always.dataset) { try { window.google?.accounts.id.disableAutoSelect(); } catch { /* ignore */ } signOut(auth); }
+    else boot(auth.currentUser);
     return;
   }
   const t = e.target.closest(CLICK_TARGETS);
   if (!t || document.body.dataset.auth !== "in" || dlg.contains(t)) return;
   const d = t.dataset;
-  const team = (id) => state.teams.find((x) => x.id === id);
+  const team = findTeam;
   if ("view" in d) { e.preventDefault(); state.view = d.view; state.contactId = null; render(); scrollTo(0, 0); }
   else if ("openContact" in d) { state.view = "contacts"; state.contactId = d.openContact; render(); scrollTo(0, 0); }
   else if ("back" in d) { state.contactId = null; render(); }
@@ -1409,10 +1280,7 @@ document.addEventListener("click", (e) => {
   else if ("addDeal" in d) dealForm(null, d.addDeal);
   else if ("editDeal" in d) dealForm(byId("deals", d.editDeal));
   else if ("deleteInteraction" in d) deleteInteraction(d.deleteInteraction);
-  else if ("invite" in d) inviteForm();
-  else if ("inviteMsg" in d) inviteMessage(d.inviteMsg, peopleList().find((p) => p.email === d.inviteMsg)?.name);
-  else if ("revoke" in d) revokeAccess(d.revoke);
-  else if ("grant" in d) grantAccess(d.grant);
+  else if ("openBook" in d) { state.view = "today"; switchWorkspace(d.openBook); scrollTo(0, 0); }
   else if ("createTeam" in d) teamForm();
   else if ("teamAdd" in d) { const x = team(d.teamAdd); if (x) addMemberForm(x); }
   else if ("teamRename" in d) { const x = team(d.teamRename); if (x) teamForm(x); }
